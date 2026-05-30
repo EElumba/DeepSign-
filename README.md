@@ -38,10 +38,12 @@ NLP dependencies. The first install takes a few minutes. Subsequent starts are i
 fingerspelling lexicon, so every word is spelled letter-by-letter (slow, one
 hand). To get real **two-handed word-level ASL**, build a WLASL pose lexicon
 (see [Build a two-handed ASL lexicon](#build-a-two-handed-asl-lexicon-wlasl--mediapipe)
-below). When `python/lexicon_wlasl/index.csv` exists, the server uses it
-automatically; any word not in the lexicon still falls back to fingerspelling.
-You can also point `LEXICON_DIR` at any lexicon directory (a folder containing
-`index.csv`) to override.
+below). The generated WLASL videos/pose files are ignored local assets, so a
+fresh fork that only installs requirements will not have them yet. When
+`python/lexicon_wlasl/index.csv` has entries that point at real `.pose` files,
+the server uses it automatically; any word not in the lexicon still falls back
+to fingerspelling. You can also point `LEXICON_DIR` at any lexicon directory (a
+folder containing `index.csv`) to override.
 
 ## Configure
 
@@ -129,6 +131,10 @@ curl -L -o wlasl/WLASL_v0.3.json \
 This writes `python/lexicon_wlasl/ase/<word>.pose` and
 `python/lexicon_wlasl/index.csv`. Restart the Python server — it now signs those
 words with real two-handed signs and fingerspells everything else.
+
+If a build finds no usable clips, it will leave no `index.csv` behind. That is
+intentional: an empty index makes `spoken-to-signed` reject `en/ase`, while no
+index lets the app safely fall back to the bundled fingerspelling lexicon.
 
 Useful flags: `--max-candidates N` (clips to try per word),
 `--min-hand-fraction` (quality gate), `--use-bbox` (crop to the signer),

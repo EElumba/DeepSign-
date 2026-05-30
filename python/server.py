@@ -1,4 +1,5 @@
 import io
+import csv
 import os
 import shutil
 import subprocess
@@ -47,10 +48,26 @@ def _resolve_lexicon_dir() -> str:
         return override
 
     wlasl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lexicon_wlasl")
-    if os.path.isfile(os.path.join(wlasl_dir, "index.csv")):
+    if _lexicon_has_usable_entries(wlasl_dir):
         return wlasl_dir
 
     return _fingerspelling_lexicon_dir()
+
+
+def _lexicon_has_usable_entries(directory: str) -> bool:
+    index_path = os.path.join(directory, "index.csv")
+    if not os.path.isfile(index_path):
+        return False
+
+    try:
+        with open(index_path, encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                pose_path = row.get("path")
+                if pose_path and os.path.isfile(os.path.join(directory, pose_path)):
+                    return True
+    except Exception as e:
+        print(f"[Startup] Ignoring unusable lexicon at {directory}: {e}")
+    return False
 
 
 LEXICON_DIR = _resolve_lexicon_dir()

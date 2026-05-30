@@ -247,7 +247,7 @@ def build(args):
     os.makedirs(pose_dir, exist_ok=True)
     index_path = os.path.join(out_dir, "index.csv")
 
-    rows = []
+    rows = _read_index(index_path)
     built, failed = 0, 0
     log(f"Building lexicon for {len(entries)} glosses -> {out_dir}")
 
@@ -296,8 +296,11 @@ def build(args):
             failed += 1
             log(f"      no usable clip for '{gloss}'")
 
-    _write_index(index_path, rows)
-    log(f"\nDone. Built {built} gloss(es), {failed} failed. Index: {index_path}")
+    indexed = _write_index(index_path, rows)
+    if indexed:
+        log(f"\nDone. Built {built} gloss(es), {failed} failed. Index: {index_path}")
+    else:
+        log(f"\nDone. Built 0 usable glosses; no index written because no usable pose files were found.")
     log("Point the server at it:  LEXICON_DIR=" + os.path.abspath(out_dir))
     return 0
 
@@ -316,18 +319,35 @@ def _row(rel_pose, gloss):
 
 
 def _write_index(index_path, rows):
-    # De-dup by path, keep order.
-    seen, unique = set(), []
-    for r in rows:
-        if r["path"] in seen:
-            continue
-        seen.add(r["path"])
-        unique.append(r)
+    directory = os.path.dirname(index_path)
+    rows = [
+        row for row in rows
+        if row.get("path") and os.path.isfile(os.path.join(directory, row["path"]))
+    ]
+    if not rows:
+        if os.path.exists(index_path):
+            os.unlink(index_path)
+        return 0
+
+    # De-dup by path, keeping the last row so newly built entries replace
+    # stale metadata for the same pose file.
+    by_path = {}
+    for row in rows:
+        by_path[row["path"]] = row
+    unique = list(by_path.values())
     fields = ["path", "spoken_language", "signed_language", "start", "end", "words", "glosses", "priority"]
     with open(index_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         w.writerows(unique)
+    return len(unique)
+
+
+def _read_index(index_path):
+    if not os.path.isfile(index_path):
+        return []
+    with open(index_path, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
 
 
 def parse_args():
