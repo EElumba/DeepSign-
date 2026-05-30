@@ -1,3 +1,4 @@
+import io
 import os
 import shutil
 import subprocess
@@ -10,6 +11,11 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 PORT = int(os.environ.get("PORT", "8000"))
+
+# Playback speed multiplier for the signing avatar. pose-viewer animates at the
+# pose's stored fps, so raising fps makes the avatar sign faster without
+# dropping any motion. 1.0 = native speed; 1.6 ≈ 60% faster. Tune via env.
+SIGN_SPEED = float(os.environ.get("SIGN_SPEED", "1.6"))
 
 
 def _fingerspelling_lexicon_dir() -> str:
@@ -105,10 +111,29 @@ def generate_pose(text: str) -> bytes:
         if result.returncode != 0:
             raise RuntimeError(f"text_to_gloss_to_pose failed: {result.stderr}")
         with open(out_path, "rb") as f:
-            return f.read()
+            return _apply_speed(f.read())
     finally:
         if os.path.exists(out_path):
             os.unlink(out_path)
+
+
+def _apply_speed(pose_bytes: bytes) -> bytes:
+    """Speed up the avatar by raising the pose's stored fps. pose-viewer plays
+    back at body.fps, so a higher value plays the same frames in less time.
+    """
+    if SIGN_SPEED == 1.0:
+        return pose_bytes
+    try:
+        from pose_format import Pose
+
+        pose = Pose.read(pose_bytes)
+        pose.body.fps = pose.body.fps * SIGN_SPEED
+        buf = io.BytesIO()
+        pose.write(buf)
+        return buf.getvalue()
+    except Exception as e:
+        print(f"[Pose] Speed-up skipped: {e}")
+        return pose_bytes
 
 
 @app.on_event("startup")
