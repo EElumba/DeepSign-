@@ -9,52 +9,163 @@ import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
-if (!DEEPGRAM_API_KEY) {
-  console.error('Missing DEEPGRAM_API_KEY. Copy .env.example to .env and fill it in.');
-  process.exit(1);
-}
-
+const PORT = Number(process.env.PORT || 3000);
 const POSE_SERVER_URL = process.env.POSE_SERVER_URL || 'http://localhost:8000';
-
-const deepgram = createClient(DEEPGRAM_API_KEY);
+const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY || '';
+const deepgram = DEEPGRAM_API_KEY ? createClient(DEEPGRAM_API_KEY) : null;
 
 const app = express();
+app.use(express.json({ limit: '1mb' }));
+app.use(express.static(join(__dirname, 'public')));
+
 app.get('/', (req, res) => {
-  res.sendFile(join(__dirname, 'index.html'));
+  res.sendFile(join(__dirname, 'public', 'index.html'));
+});
+
+app.get('/api/health', async (req, res) => {
+  const python = await checkPythonHealth();
+  res.json({
+    status: 'ok',
+    deepgram: Boolean(DEEPGRAM_API_KEY),
+    python,
+  });
+});
+
+app.post('/api/sign', async (req, res) => {
+  const text = String(req.body?.text || '').trim();
+  if (!text) {
+    res.status(400).json({ error: 'text must be non-empty' });
+    return;
+  }
+
+  const envelope = await createMotionEnvelope(text, {
+    source: 'typed',
+    speechFinal: true,
+    isFinal: true,
+  });
+  broadcastToDisplays(envelope);
+  res.json(envelope);
 });
 
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
-
-// Separate connection sets so the audio handler knows who to broadcast to.
-const audioClients = new Set();
 const displayClients = new Set();
 
-// Ask the Python server to turn text into a .pose binary. Returns an
-// ArrayBuffer, or null on failure (caller should skip the broadcast).
-async function generatePose(text) {
+async function checkPythonHealth() {
   try {
-    const res = await fetch(`${POSE_SERVER_URL}/pose`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
-    });
-    if (!res.ok) {
-      console.error(`[Pose] Python server error: ${res.status}`);
-      return null;
-    }
-    return await res.arrayBuffer();
+    const res = await fetch(`${POSE_SERVER_URL}/health`, { timeout: 2000 });
+    if (!res.ok) return { ok: false, status: res.status };
+    return { ok: true, ...(await res.json()) };
   } catch (err) {
-    console.error('[Pose] Failed to reach Python server:', err.message);
-    return null;
+    return { ok: false, error: err.message };
   }
 }
 
-function broadcastToDisplays(data) {
+async function createMotionEnvelope(text, meta = {}) {
+  try {
+    const res = await fetch(`${POSE_SERVER_URL}/motion`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        generate_pose: true,
+        source: meta.source || 'speech',
+      }),
+    });
+
+    if (!res.ok) {
+      const detail = await safeText(res);
+      throw new Error(`Python motion server returned ${res.status}: ${detail}`);
+    }
+
+    return {
+      type: 'motion',
+      id: cryptoRandomId(),
+      receivedAt: Date.now(),
+      transcript: {
+        text,
+        isFinal: Boolean(meta.isFinal),
+        speechFinal: Boolean(meta.speechFinal),
+        source: meta.source || 'speech',
+      },
+      ...(await res.json()),
+    };
+  } catch (err) {
+    console.error('[Motion] Falling back to caption-only plan:', err.message);
+    return {
+      type: 'motion',
+      id: cryptoRandomId(),
+      receivedAt: Date.now(),
+      transcript: {
+        text,
+        isFinal: Boolean(meta.isFinal),
+        speechFinal: Boolean(meta.speechFinal),
+        source: meta.source || 'speech',
+      },
+      plan: {
+        mode: 'caption_fallback',
+        sourceText: text,
+        units: [{ type: 'caption', text, reason: 'motion_server_unavailable' }],
+      },
+      clips: [],
+      warnings: [err.message],
+    };
+  }
+}
+
+async function safeText(res) {
+  try {
+    return await res.text();
+  } catch {
+    return '';
+  }
+}
+
+function cryptoRandomId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function broadcastToDisplays(payload) {
+  const data = typeof payload === 'string' ? payload : JSON.stringify(payload);
   for (const client of displayClients) {
-    if (client.readyState === 1) {
-      client.send(data);
+    if (client.readyState === 1) client.send(data);
+  }
+}
+
+class TranscriptScheduler {
+  constructor(onFlush) {
+    this.onFlush = onFlush;
+    this.words = [];
+    this.maxWords = Number(process.env.MAX_WORDS_PER_SIGN_JOB || 8);
+  }
+
+  observe(data) {
+    const alt = data?.channel?.alternatives?.[0];
+    const transcript = String(alt?.transcript || '').trim();
+    if (!transcript) return;
+
+    broadcastToDisplays({
+      type: 'transcript',
+      text: transcript,
+      isFinal: Boolean(data.is_final),
+      speechFinal: Boolean(data.speech_final),
+    });
+
+    if (!data.is_final) return;
+
+    const words = transcript.split(/\s+/).filter(Boolean);
+    this.words.push(...words);
+
+    const shouldFlush = Boolean(data.speech_final) || /[.!?]$/.test(transcript);
+    this.flushReady(shouldFlush);
+  }
+
+  flushReady(flushRemainder = false) {
+    while (this.words.length >= this.maxWords) {
+      this.onFlush(this.words.splice(0, this.maxWords).join(' '), false);
+    }
+    if (flushRemainder && this.words.length) {
+      this.onFlush(this.words.splice(0).join(' '), true);
     }
   }
 }
@@ -64,6 +175,12 @@ wss.on('connection', (ws, request) => {
 
   if (!isAudio) {
     displayClients.add(ws);
+    ws.send(JSON.stringify({
+      type: 'system',
+      status: 'connected',
+      deepgram: Boolean(DEEPGRAM_API_KEY),
+      poseServerUrl: POSE_SERVER_URL,
+    }));
     console.log(`Display client connected (${displayClients.size} total).`);
     ws.on('close', () => {
       displayClients.delete(ws);
@@ -72,100 +189,70 @@ wss.on('connection', (ws, request) => {
     return;
   }
 
-  audioClients.add(ws);
-  console.log('Audio client connected — opening Deepgram live session.');
+  if (!deepgram) {
+    ws.send(JSON.stringify({ type: 'error', message: 'DEEPGRAM_API_KEY is not configured.' }));
+    ws.close();
+    return;
+  }
 
-  // Word batching: collect finalized words and emit a pose for every WORDS_PER_CHUNK
-  // words. Leftover words are carried forward and flushed at the end of each
-  // utterance (speech_final) and when the connection closes — so a full sentence
-  // gets signed in order instead of being cut off by the next transcript.
-  const WORDS_PER_CHUNK = 4;
-  let wordBuffer = [];
-  // Serialize pose generation per connection so clips are broadcast in order.
-  let poseChain = Promise.resolve();
-
-  function enqueuePose(text) {
-    poseChain = poseChain
+  console.log('Audio client connected; opening Deepgram live session.');
+  let motionChain = Promise.resolve();
+  const scheduler = new TranscriptScheduler((text, speechFinal) => {
+    motionChain = motionChain
       .then(async () => {
-        const arrayBuffer = await generatePose(text);
-        if (arrayBuffer) broadcastToDisplays(Buffer.from(arrayBuffer));
+        const envelope = await createMotionEnvelope(text, {
+          source: 'speech',
+          isFinal: true,
+          speechFinal,
+        });
+        broadcastToDisplays(envelope);
       })
-      .catch((err) => console.error('[Pose] generation error:', err));
-  }
-
-  function drainChunks(flushRemainder) {
-    while (wordBuffer.length >= WORDS_PER_CHUNK) {
-      enqueuePose(wordBuffer.splice(0, WORDS_PER_CHUNK).join(' '));
-    }
-    if (flushRemainder && wordBuffer.length > 0) {
-      enqueuePose(wordBuffer.splice(0).join(' '));
-    }
-  }
+      .catch((err) => console.error('[Motion] queue error:', err));
+  });
 
   let dgLive;
   try {
     dgLive = deepgram.listen.live({
-      model: 'nova-3',
-      language: 'en-US',
+      model: process.env.DEEPGRAM_MODEL || 'nova-3',
+      language: process.env.DEEPGRAM_LANGUAGE || 'en-US',
       interim_results: true,
       smart_format: true,
       encoding: 'linear16',
       sample_rate: 16000,
       channels: 1,
-      endpointing: 300,
+      endpointing: Number(process.env.DEEPGRAM_ENDPOINTING_MS || 300),
     });
 
     dgLive.on(LiveTranscriptionEvents.Open, () => {
       console.log('Deepgram connection open.');
+      broadcastToDisplays({ type: 'system', status: 'speech-open' });
     });
-
-    dgLive.on(LiveTranscriptionEvents.Transcript, (data) => {
-      const transcript = data?.channel?.alternatives?.[0]?.transcript;
-      if (!transcript) return;
-
-      // Always push the transcript text for the on-screen display.
-      broadcastToDisplays(JSON.stringify({
-        type: 'transcript',
-        text: transcript,
-        is_final: data.is_final,
-      }));
-
-      // Only finalized words feed the pose pipeline (interim words can change).
-      if (!data.is_final) return;
-
-      const words = transcript.trim().split(/\s+/).filter(Boolean);
-      if (words.length) wordBuffer.push(...words);
-
-      // Emit full 4-word chunks now; flush the tail at the end of an utterance.
-      drainChunks(Boolean(data.speech_final));
-    });
-
+    dgLive.on(LiveTranscriptionEvents.Transcript, (data) => scheduler.observe(data));
     dgLive.on(LiveTranscriptionEvents.Error, (err) => {
       console.error('Deepgram error:', err);
+      broadcastToDisplays({ type: 'system', status: 'speech-error', message: String(err?.message || err) });
     });
-
     dgLive.on(LiveTranscriptionEvents.Close, () => {
       console.log('Deepgram connection closed.');
+      broadcastToDisplays({ type: 'system', status: 'speech-closed' });
     });
   } catch (err) {
     console.error('Failed to open Deepgram live session:', err);
+    ws.close();
+    return;
   }
 
   ws.on('message', (chunk) => {
     try {
-      if (dgLive && dgLive.getReadyState() === 1) {
-        dgLive.send(chunk);
-      }
+      if (dgLive && dgLive.getReadyState() === 1) dgLive.send(chunk);
     } catch (err) {
       console.error('Error forwarding audio to Deepgram:', err);
     }
   });
 
   ws.on('close', () => {
-    audioClients.delete(ws);
-    console.log('Audio client disconnected — finishing Deepgram session.');
-    // Sign whatever words are left over so the final partial chunk isn't dropped.
-    drainChunks(true);
+    console.log('Audio client disconnected; finishing Deepgram session.');
+    scheduler.flushReady(true);
     try {
       if (dgLive) dgLive.finish();
     } catch (err) {
@@ -178,10 +265,10 @@ wss.on('connection', (ws, request) => {
   });
 });
 
-const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`ASL Pose MVP server listening on http://localhost:${PORT}`);
-  console.log(`Make sure the Python pose server is running first:`);
-  console.log(`  cd python && uvicorn server:app --port 8000`);
-  console.log(`On the Meta glasses browser, open http://YOUR_LOCAL_IP:${PORT} and grant mic permission.`);
+  console.log(`DeepSign server listening on http://localhost:${PORT}`);
+  console.log(`Python motion server: ${POSE_SERVER_URL}`);
+  if (!DEEPGRAM_API_KEY) {
+    console.log('DEEPGRAM_API_KEY is not set; typed-text mode is available, mic streaming is disabled.');
+  }
 });

@@ -1,82 +1,164 @@
-# ASL Pose Avatar MVP
+# DeepSign
 
-Real-time speech → ASL stick-figure signer. You speak into a Ray-Ban Meta glasses
-mic, Deepgram transcribes it, a Python server converts the text into a `.pose`
-skeleton file via [`spoken-to-signed-translation`](https://github.com/ZurichNLP/spoken-to-signed-translation),
-and the [`pose-viewer`](https://www.npmjs.com/package/pose-viewer) web component
-animates the signer in the glasses browser.
+Real-time English speech to an ASL-oriented signing avatar experience for Meta Quest 3.
 
+This repo is now structured as a runnable MVP plus the right seams for a serious
+signing system:
+
+```text
+Quest mic or typed text
+-> Node.js realtime gateway
+-> Deepgram Nova-3 STT, when configured
+-> Python FastAPI ASL motion server
+-> ASL planner
+-> pose fallback / future SignAvatars motion library
+-> browser display client
 ```
-Mic → Node /audio WS → Deepgram Nova-3 → Node POST :8000/pose
-    → Python FastAPI (text_to_gloss_to_pose) → .pose binary
-    → Node broadcasts ArrayBuffer over WS → pose-viewer renders the signer
-```
 
-## Prerequisites
+## What works today
 
-- Node.js 18+
-- Python 3.10+
-- pip
+- Browser display client optimized for Quest-sized screens.
+- Typed phrase testing without Deepgram.
+- WebSocket display channel for transcripts, planner output, and motion clips.
+- `/audio` WebSocket for raw PCM16 speech streaming to Deepgram.
+- AudioWorklet mic capture at 16 kHz PCM16.
+- Python ASL planner with curated phrase, lexical-sign, fingerspelling, and caption fallbacks.
+- Legacy `.pose` generation through ZurichNLP `spoken-to-signed-translation` when installed.
+- Caption-only fallback when Deepgram or the pose generator is unavailable.
+
+## What is intentionally still a roadmap item
+
+- Fluency-validated ASL grammar.
+- A Deaf-reviewed phrase/sign library.
+- SignAvatars SMPL-X to VRM retargeting.
+- Production Quest native app packaging.
+- A high-quality signing-specific VRM avatar.
 
 ## Install
 
-```bash
-# Node dependencies
-npm install
+### Node
 
-# Python dependencies (in a virtual environment)
+```bash
+npm install
+```
+
+### Python
+
+```bash
 cd python
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 cd ..
 ```
 
-**Note on Python install time:** `spoken-to-signed-translation` installs several
-NLP dependencies. The first install takes a few minutes. Subsequent starts are instant.
+The Python install pulls `spoken-to-signed-translation` from GitHub. If you only
+want typed planner/caption mode at first, you can temporarily install just:
 
-**Signing approach:** This MVP doesn't ship a full ASL word lexicon, so it uses
-the fingerspelling lexicon bundled with `spoken-to-signed` — every English phrase
-is signed letter-by-letter in ASL. To use real word-level signs, point the
-`LEXICON_DIR` env var at a lexicon directory (a folder containing `index.csv`).
+```bash
+cd python
+python3 -m venv .venv
+.venv/bin/python -m pip install fastapi "uvicorn[standard]"
+cd ..
+```
 
 ## Configure
 
 ```bash
 cp .env.example .env
-# Add your Deepgram API key to .env
 ```
 
-## Run — two terminals required
+Set `DEEPGRAM_API_KEY` to enable live speech. Without it, the app still runs in
+typed-text mode.
 
-**Terminal 1 — Python pose server:**
+Useful environment variables:
+
+- `DEEPGRAM_API_KEY`: enables `/audio` speech streaming.
+- `DEEPGRAM_MODEL`: defaults to `nova-3`.
+- `DEEPGRAM_ENDPOINTING_MS`: defaults to `300`.
+- `POSE_SERVER_URL`: defaults to `http://localhost:8000`.
+- `LEXICON_DIR`: optional `spoken-to-signed-translation` lexicon directory.
+- `MAX_WORDS_PER_SIGN_JOB`: defaults to `8`.
+
+## Run
+
+Terminal 1:
 
 ```bash
 cd python
 .venv/bin/uvicorn server:app --port 8000
 ```
 
-Wait for: `Application startup complete.` (the first request is pre-warmed on startup).
-
-**Terminal 2 — Node server:**
+Terminal 2:
 
 ```bash
 npm start
 ```
 
-## Open on Meta glasses
+Open:
 
+```text
+http://localhost:3000
 ```
+
+On Quest 3, use your machine's LAN IP:
+
+```text
 http://YOUR_LOCAL_IP:3000
 ```
 
-Grant mic permission, tap **Start**, and speak — the avatar signs.
+## Test without a microphone
 
-## Test the Python server independently
+Use the text box in the browser, or:
 
 ```bash
-curl -X POST http://localhost:8000/pose \
+curl -X POST http://localhost:3000/api/sign \
   -H "Content-Type: application/json" \
-  -d '{"text":"Hello nice to meet you"}' \
-  --output test.pose
-ls -la test.pose  # Should be a non-zero binary file
+  -d '{"text":"I need help"}'
 ```
+
+## Test the Python planner
+
+```bash
+curl -X POST http://localhost:8000/plan \
+  -H "Content-Type: application/json" \
+  -d '{"text":"What is your name"}'
+```
+
+## SignAvatars integration plan
+
+SignAvatars should be used as the motion foundation, not as a direct runtime
+dependency in the Quest browser.
+
+Recommended pipeline:
+
+```text
+SignAvatars SMPL-X / MANO annotations
+-> offline retargeting to your chosen VRM avatar
+-> export per-sign or per-phrase clips as VRMA, glTF animation, or compact JSON/binary
+-> index clips by gloss / phrase / HamNoSys
+-> Python motion server returns clip IDs or clip bytes
+-> Quest browser only blends and renders
+```
+
+Add this as a new Python module later:
+
+```text
+python/motion_library/
+  manifest.json
+  clips/
+    HELP.vrma
+    THANK-YOU.vrma
+    ...
+  retarget_signavatars.py
+```
+
+The ASL planner already returns stable units like `SIGN HELP` and
+`FS H-E-L-L-O`, so replacing generated `.pose` clips with curated SignAvatars
+motion clips is a contained change.
+
+## Reality check
+
+This project can become a strong assistive or educational prototype, but
+arbitrary English-to-ASL translation is not solved by wiring STT to a motion
+model. Treat the current planner as a scaffold. Build a curated ASL phrase
+library with fluent Deaf signers reviewing both grammar and avatar motion.
