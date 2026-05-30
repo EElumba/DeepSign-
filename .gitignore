@@ -216,3 +216,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project secrets — never commit
+config.js
+
+# JavaScript / Node
+node_modules/
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db

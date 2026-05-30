@@ -18,8 +18,10 @@ AccessLink is a browser-based accessibility tool that translates live spoken aud
 - Live microphone → Deepgram STT → word tokens → sign animation → AR canvas overlay
 - Browser-only, no backend server, no login, no install
 - 50-word ASL sign vocabulary for demo day
-- Snowflake session logging (async, non-blocking)
 - Chrome desktop as the primary target
+
+**Temporarily disabled (post-MVP):**
+- Snowflake session logging — code is commented out in `main.js`, `config.js`, and `logging/SnowflakeLogger.js`
 
 **Out of scope (post-MVP roadmap):**
 - Sign language → voice (reverse pipeline for mute users)
@@ -48,7 +50,7 @@ AccessLink is a browser-based accessibility tool that translates live spoken aud
      │  lowercase · strip punctuation · split on whitespace
      ▼
 [Stage 4: Dictionary Lookup]
-     │  word → signId  (or null → skip + log to Snowflake)
+     │  word → signId  (or null → skip silently)
      ▼
 [Stage 5: Sign Queue (FIFO)]
      │  array buffer · one sign dequeued at a time
@@ -62,7 +64,7 @@ AccessLink is a browser-based accessibility tool that translates live spoken aud
      ▼
 [User sees: live camera + signing avatar + live captions]
 
-                         └──── async ────→ [Snowflake: session events log]
+                         └──── (Snowflake session logging — disabled, post-MVP)
 ```
 
 ---
@@ -105,7 +107,7 @@ accesslink/
 ├── animations/
 │   └── [sign assets]       # GLB / Rive / Lottie / MP4 files per sign
 └── logging/
-    └── SnowflakeLogger.js  # Async session event batching → Snowflake REST
+    └── SnowflakeLogger.js  # DISABLED (post-MVP) — full code preserved in comments
 ```
 
 ---
@@ -158,7 +160,7 @@ Responsibilities:
 - Tokenise: `text.split(/\s+/).filter(Boolean)`
 - For each token, call `SignDictionary.lookup(word)`
   - If match found → push `signId` to internal FIFO array
-  - If no match → call `SnowflakeLogger.logGap(word)`
+  - If no match → skip silently (Snowflake gap logging disabled — post-MVP)
 - When queue transitions from empty → non-empty, call `onWordReady()`
 - After each sign completes, wait `CONFIG.SIGN_DELAY_MS` then dequeue next
 
@@ -299,51 +301,11 @@ Responsibilities:
   3. Caption bar text → canvas (bottom-centre, semi-transparent background)
   4. Currently-signing word → highlighted in `CONFIG.CAPTION_HIGHLIGHT_COLOR`
 
-### `SnowflakeLogger.js`
+### `SnowflakeLogger.js` — DISABLED (post-MVP)
 
-Responsibilities:
-- Buffer events in memory (max 20 events or 10 seconds, whichever comes first)
-- Flush batch to Snowflake REST API asynchronously
-- Never block the sign pipeline — all calls are fire-and-forget with silent catch
-
-Events logged:
-```js
-// Session start
-{ event: 'session_start', session_id, timestamp, user_agent }
-
-// Sign played
-{ event: 'sign_played', session_id, word, sign_id, stt_latency_ms, anim_latency_ms, timestamp }
-
-// Gap (word not in dictionary)
-{ event: 'sign_gap', session_id, word, timestamp }
-
-// Session end
-{ event: 'session_end', session_id, duration_ms, total_words, matched_words, gap_words, timestamp }
-```
-
-Snowflake REST API call:
-```js
-async function flush(events) {
-  try {
-    await fetch(`https://${CONFIG.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/api/v2/statements`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${CONFIG.SNOWFLAKE_JWT}`,
-        'Content-Type': 'application/json',
-        'X-Snowflake-Authorization-Token-Type': 'KEYPAIR_JWT',
-      },
-      body: JSON.stringify({
-        statement: buildInsertSQL(events),
-        database: CONFIG.SNOWFLAKE_DATABASE,
-        schema: CONFIG.SNOWFLAKE_SCHEMA,
-        warehouse: CONFIG.SNOWFLAKE_WAREHOUSE,
-      }),
-    });
-  } catch (e) {
-    console.warn('Snowflake log failed (non-blocking):', e.message);
-  }
-}
-```
+The full implementation is preserved in `logging/SnowflakeLogger.js` inside a block comment.
+To re-enable: uncomment the file, restore the import and calls in `main.js`, and populate
+`SNOWFLAKE_ACCOUNT` / `SNOWFLAKE_JWT` in `config.js`.
 
 ---
 
@@ -351,13 +313,17 @@ async function flush(events) {
 
 ```js
 export const CONFIG = {
-  // APIs
-  DEEPGRAM_API_KEY:       '',       // Leave empty → Web Speech API fallback
-  SNOWFLAKE_ACCOUNT:      '',       // e.g. 'xy12345.us-east-1'
-  SNOWFLAKE_JWT:          '',       // JWT for key-pair auth
-  SNOWFLAKE_DATABASE:     'ACCESSLINK',
-  SNOWFLAKE_SCHEMA:       'PUBLIC',
-  SNOWFLAKE_WAREHOUSE:    'COMPUTE_WH',
+  // APIs — leave DEEPGRAM_API_KEY empty to use Web Speech API fallback
+  DEEPGRAM_API_KEY:       '',
+
+  // Snowflake logging — disabled for now (post-MVP)
+  // SNOWFLAKE_ACCOUNT:   '',       // e.g. 'xy12345.us-east-1'
+  // SNOWFLAKE_JWT:       '',       // JWT for key-pair auth
+  // SNOWFLAKE_DATABASE:  'ACCESSLINK',
+  // SNOWFLAKE_SCHEMA:    'PUBLIC',
+  // SNOWFLAKE_WAREHOUSE: 'COMPUTE_WH',
+  // LOG_BATCH_SIZE:      20,
+  // LOG_FLUSH_INTERVAL_MS: 10000,
 
   // Pipeline timing
   SIGN_DELAY_MS:          400,      // Gap between signs (ms)
@@ -369,10 +335,6 @@ export const CONFIG = {
   AVATAR_POSITION:        'bottom-right',
   AVATAR_SCALE:           0.4,
   CAPTION_HIGHLIGHT_COLOR:'#1D9E75',
-
-  // Logging
-  LOG_BATCH_SIZE:         20,
-  LOG_FLUSH_INTERVAL_MS:  10000,
 
   // Debug
   DEBUG_MODE:             false,    // Logs queue state + sign lookups to console
@@ -534,7 +496,7 @@ async _triggerAnimation(signId) {
 
 ---
 
-## Snowflake Table Schema
+<!-- Snowflake Table Schema — disabled (post-MVP). Schema and analytics queries preserved here for reference when logging is re-enabled.
 
 ```sql
 CREATE DATABASE IF NOT EXISTS ACCESSLINK;
@@ -564,34 +526,22 @@ CREATE TABLE IF NOT EXISTS ACCESSLINK.PUBLIC.SESSIONS (
 );
 ```
 
-Useful analytics queries:
+Analytics queries (for when logging is re-enabled):
 
 ```sql
 -- Top 20 words with no sign (expand dictionary here first)
 SELECT word, COUNT(*) AS missed_count
-FROM SIGN_EVENTS
-WHERE event_type = 'sign_gap'
-GROUP BY word
-ORDER BY missed_count DESC
-LIMIT 20;
+FROM SIGN_EVENTS WHERE event_type = 'sign_gap'
+GROUP BY word ORDER BY missed_count DESC LIMIT 20;
 
 -- Average end-to-end latency per session
 SELECT session_id,
-       AVG(stt_latency_ms)  AS avg_stt_ms,
-       AVG(anim_latency_ms) AS avg_anim_ms,
-       AVG(stt_latency_ms + anim_latency_ms) AS avg_total_ms
-FROM SIGN_EVENTS
-WHERE event_type = 'sign_played'
+       AVG(stt_latency_ms) AS avg_stt_ms,
+       AVG(anim_latency_ms) AS avg_anim_ms
+FROM SIGN_EVENTS WHERE event_type = 'sign_played'
 GROUP BY session_id;
-
--- Match rate over time
-SELECT DATE_TRUNC('hour', timestamp) AS hour,
-       COUNT_IF(matched) / COUNT(*) * 100 AS match_pct
-FROM SIGN_EVENTS
-WHERE event_type IN ('sign_played','sign_gap')
-GROUP BY hour
-ORDER BY hour;
 ```
+-->
 
 ---
 
@@ -618,7 +568,6 @@ Every word in these phrases is in the sign dictionary. Practice until all signs 
 - [ ] Signs play one at a time in spoken order — never simultaneously
 - [ ] Camera feed is visible underneath the avatar at all times
 - [ ] Caption bar highlights the word currently being signed
-- [ ] Snowflake receives at least one `sign_played` row per session
 - [ ] Demo script ("Hello my name is Alex…") completes with zero failed signs
 - [ ] Web Speech API fallback works when no Deepgram key is configured
 - [ ] Runs fully in Chrome desktop — no server, no install, no login
@@ -640,14 +589,15 @@ Every word in these phrases is in the sign dictionary. Practice until all signs 
 
 ## Post-MVP Roadmap (mention in pitch, don't build now)
 
-1. **ASL grammar layer** — NLP reordering to produce grammatical ASL, not SEE
-2. **HamNoSys engine** — procedural sign generation for unlimited vocabulary
-3. **Reverse pipeline** — camera → MediaPipe Hands → sign classifier → voice (for mute users)
-4. **Blind user mode** — scene description via AI vision narrated through bone-conduction audio
-5. **Fingerspelling fallback** — spell unknown words letter by letter
-6. **Hardware port** — Ray-Ban Meta / Snap Spectacles integration
-7. **Mobile app** — React Native wrapper
-8. **Expanded vocabulary** — 3,000+ signs covering full ASL dictionary
+1. **Snowflake session logging** — re-enable `logging/SnowflakeLogger.js` + populate credentials
+2. **ASL grammar layer** — NLP reordering to produce grammatical ASL, not SEE
+3. **HamNoSys engine** — procedural sign generation for unlimited vocabulary
+4. **Reverse pipeline** — camera → MediaPipe Hands → sign classifier → voice (for mute users)
+5. **Blind user mode** — scene description via AI vision narrated through bone-conduction audio
+6. **Fingerspelling fallback** — spell unknown words letter by letter
+7. **Hardware port** — Ray-Ban Meta / Snap Spectacles integration
+8. **Mobile app** — React Native wrapper
+9. **Expanded vocabulary** — 3,000+ signs covering full ASL dictionary
 
 ---
 
@@ -664,5 +614,5 @@ Every word in these phrases is in the sign dictionary. Practice until all signs 
 | LottieFiles | https://lottiefiles.com |
 | ASL sign reference | https://www.handspeak.com |
 | ASL-LEX database | https://asl-lex.org |
-| Snowflake REST API | https://docs.snowflake.com/en/developer-guide/sql-api/guide |
+| Snowflake REST API (post-MVP) | https://docs.snowflake.com/en/developer-guide/sql-api/guide |
 | MediaPipe Hands (post-MVP) | https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker |

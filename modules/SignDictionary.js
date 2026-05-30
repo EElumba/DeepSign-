@@ -1,0 +1,131 @@
+export const SignDictionary = {
+  // Greetings
+  'hello':        'sign_hello',
+  'goodbye':      'sign_goodbye',
+  'bye':          'sign_goodbye',
+  'hi':           'sign_hello',
+
+  // Courtesy
+  'thank':        'sign_thank_you',
+  'thanks':       'sign_thank_you',
+  'please':       'sign_please',
+  'sorry':        'sign_sorry',
+  'welcome':      'sign_welcome',
+  'excuse':       'sign_sorry',
+
+  // Responses
+  'yes':          'sign_yes',
+  'no':           'sign_no',
+  'okay':         'sign_yes',
+  'ok':           'sign_yes',
+  'understand':   'sign_understand',
+  'understood':   'sign_understand',
+  'help':         'sign_help',
+
+  // Pronouns
+  'i':            'sign_i',
+  'you':          'sign_you',
+  'my':           'sign_my',
+  'your':         'sign_your',
+  'we':           'sign_we',
+  'me':           'sign_i',
+  'us':           'sign_we',
+  'they':         'sign_they',
+  'he':           'sign_he',
+  'she':          'sign_she',
+  'it':           'sign_it',
+
+  // Common verbs
+  'need':         'sign_need',
+  'want':         'sign_want',
+  'eat':          'sign_eat',
+  'drink':        'sign_drink',
+  'go':           'sign_go',
+  'come':         'sign_come',
+  'know':         'sign_know',
+  'like':         'sign_like',
+  'love':         'sign_love',
+  'see':          'sign_see',
+  'look':         'sign_look',
+  'think':        'sign_think',
+  'feel':         'sign_feel',
+  'have':         'sign_have',
+  'make':         'sign_make',
+  'give':         'sign_give',
+  'take':         'sign_take',
+  'stop':         'sign_stop',
+  'wait':         'sign_wait',
+  'finish':       'sign_finish',
+  'done':         'sign_finish',
+
+  // Question words
+  'what':         'sign_what',
+  'where':        'sign_where',
+  'when':         'sign_when',
+  'who':          'sign_who',
+  'how':          'sign_how',
+  'why':          'sign_why',
+
+  // Common nouns
+  'name':         'sign_name',
+  'water':        'sign_water',
+  'food':         'sign_food',
+  'home':         'sign_home',
+  'school':       'sign_school',
+  'work':         'sign_work',
+  'doctor':       'sign_doctor',
+  'friend':       'sign_friend',
+  'family':       'sign_family',
+  'time':         'sign_time',
+  'today':        'sign_today',
+  'money':        'sign_money',
+  'bathroom':     'sign_bathroom',
+  'restroom':     'sign_bathroom',
+  'toilet':       'sign_bathroom',
+  'phone':        'sign_phone',
+  'car':          'sign_car',
+  'day':          'sign_day',
+  'night':        'sign_night',
+  'morning':      'sign_morning',
+
+  // Descriptors
+  'good':         'sign_good',
+  'bad':          'sign_bad',
+  'happy':        'sign_happy',
+  'sad':          'sign_sad',
+  'hot':          'sign_hot',
+  'cold':         'sign_cold',
+  'big':          'sign_big',
+  'small':        'sign_small',
+  'fast':         'sign_fast',
+  'slow':         'sign_slow',
+  'more':         'sign_more',
+  'again':        'sign_again',
+  'new':          'sign_new',
+  'old':          'sign_old',
+  'right':        'sign_right',
+  'wrong':        'sign_wrong',
+  'same':         'sign_same',
+  'different':    'sign_different',
+  'beautiful':    'sign_beautiful',
+  'important':    'sign_important',
+
+  // Numbers (fingerspelling fallback words)
+  'one':          'sign_one',
+  'two':          'sign_two',
+  'three':        'sign_three',
+  'four':         'sign_four',
+  'five':         'sign_five',
+
+  // Demo script words
+  'nice':         'sign_nice',
+  'meet':         'sign_meet',
+  'alex':         'sign_name',
+  'can':          'sign_can',
+  'is':           'sign_is',
+  'are':          'sign_are',
+};
+
+export function lookup(word) {
+  return SignDictionary[word.toLowerCase()] ?? null;
+}

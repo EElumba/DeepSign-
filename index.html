@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="AccessLink — Real-time ASL sign language AR overlay">
+  <title>AccessLink — Live ASL</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="ar-container" id="ar-container">
+    <div class="start-overlay" id="start-overlay">
+      <div class="start-card">
+        <div class="start-logo">🤟</div>
+        <h1 class="start-title">AccessLink</h1>
+        <p class="start-sub">Live speech → ASL sign language overlay</p>
+        <button class="start-btn" id="start-btn">Start Live Translation</button>
+        <p class="start-note">Requires microphone &amp; camera access</p>
+        <p class="start-note" id="error-msg" style="color:#f87171;margin-top:8px;display:none;"></p>
+      </div>
+    </div>
+
+    <div class="status-bar" id="status-bar" hidden>
+      <span class="status-dot" id="status-dot"></span>
+      <span id="status-text">Initialising…</span>
+    </div>
+  </div>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>
