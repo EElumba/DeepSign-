@@ -34,10 +34,14 @@ cd ..
 **Note on Python install time:** `spoken-to-signed-translation` installs several
 NLP dependencies. The first install takes a few minutes. Subsequent starts are instant.
 
-**Signing approach:** This MVP doesn't ship a full ASL word lexicon, so it uses
-the fingerspelling lexicon bundled with `spoken-to-signed` — every English phrase
-is signed letter-by-letter in ASL. To use real word-level signs, point the
-`LEXICON_DIR` env var at a lexicon directory (a folder containing `index.csv`).
+**Signing approach:** Out of the box, `spoken-to-signed` only ships a
+fingerspelling lexicon, so every word is spelled letter-by-letter (slow, one
+hand). To get real **two-handed word-level ASL**, build a WLASL pose lexicon
+(see [Build a two-handed ASL lexicon](#build-a-two-handed-asl-lexicon-wlasl--mediapipe)
+below). When `python/lexicon_wlasl/index.csv` exists, the server uses it
+automatically; any word not in the lexicon still falls back to fingerspelling.
+You can also point `LEXICON_DIR` at any lexicon directory (a folder containing
+`index.csv`) to override.
 
 ## Configure
 
@@ -79,4 +83,61 @@ curl -X POST http://localhost:8000/pose \
   -d '{"text":"Hello nice to meet you"}' \
   --output test.pose
 ls -la test.pose  # Should be a non-zero binary file
+```
+
+## Build a two-handed ASL lexicon (WLASL → MediaPipe)
+
+`python/build_lexicon.py` turns the [WLASL](https://github.com/dxli94/WLASL)
+sign-language video dataset into a `.pose` lexicon that drops straight into the
+pipeline above. For each English word it downloads a clip, crops it to the
+sign's frame range, runs **MediaPipe Holistic** to extract body + face + both
+hands, and saves a `.pose` in the exact format the fingerspelling lexicon uses
+(so real signs and fingerspelled fallbacks concatenate cleanly).
+
+> Academic / non-commercial use only — WLASL is released under a research
+> license. This is intended for the hackathon demo.
+
+### One-time builder setup
+
+The builder needs **Python 3.12** (MediaPipe's legacy Holistic API isn't in the
+3.13 wheels). `uv` will fetch 3.12 for you:
+
+```bash
+cd python
+pip install uv
+uv venv .venv-b312 --python 3.12
+uv pip install --python .venv-b312/bin/python -r requirements-builder.txt
+
+# Get the WLASL metadata (~12 MB)
+mkdir -p wlasl
+curl -L -o wlasl/WLASL_v0.3.json \
+  https://raw.githubusercontent.com/dxli94/WLASL/master/start_kit/WLASL_v0.3.json
+```
+
+### Build the lexicon
+
+```bash
+# A focused demo vocabulary (fast):
+.venv-b312/bin/python build_lexicon.py --wlasl-json wlasl/WLASL_v0.3.json \
+  --glosses book,drink,computer,help,family,learn,want,more,finish,name
+
+# …or the 100 most-recorded glosses (slower; many clips, some dead links):
+.venv-b312/bin/python build_lexicon.py --wlasl-json wlasl/WLASL_v0.3.json \
+  --num-glosses 100
+```
+
+This writes `python/lexicon_wlasl/ase/<word>.pose` and
+`python/lexicon_wlasl/index.csv`. Restart the Python server — it now signs those
+words with real two-handed signs and fingerspells everything else.
+
+Useful flags: `--max-candidates N` (clips to try per word),
+`--min-hand-fraction` (quality gate), `--use-bbox` (crop to the signer),
+`--videos-dir DIR` + `--no-download` (reuse pre-downloaded videos),
+`--overwrite` (rebuild existing words).
+
+Verify a built lexicon (real sign + fingerspelled fallback in one phrase):
+
+```bash
+.venv/bin/text_to_gloss_to_pose --text "book computer zxq" --glosser simple \
+  --spoken-language en --signed-language ase --lexicon lexicon_wlasl --pose /tmp/mix.pose
 ```

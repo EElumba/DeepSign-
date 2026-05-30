@@ -12,22 +12,39 @@ from pydantic import BaseModel
 PORT = int(os.environ.get("PORT", "8000"))
 
 
-def _resolve_lexicon_dir() -> str:
-    """The `text_to_gloss_to_pose` CLI requires a --lexicon directory (a folder
-    with an index.csv). We don't ship a full ASL word lexicon, so we point it at
-    the fingerspelling lexicon bundled with `spoken_to_signed`. Words that aren't
-    found in it fall back to fingerspelling, so every English phrase is signed
-    letter-by-letter in ASL. Can be overridden with the LEXICON_DIR env var.
-    """
-    override = os.environ.get("LEXICON_DIR")
-    if override:
-        return override
+def _fingerspelling_lexicon_dir() -> str:
     import spoken_to_signed
     return os.path.join(
         os.path.dirname(spoken_to_signed.__file__),
         "assets",
         "fingerspelling_lexicon",
     )
+
+
+def _resolve_lexicon_dir() -> str:
+    """Pick the --lexicon directory passed to `text_to_gloss_to_pose`.
+
+    Precedence:
+      1. LEXICON_DIR env var (explicit override).
+      2. The WLASL word-level lexicon built by build_lexicon.py, if present
+         (real two-handed signs; out-of-vocabulary words still fall back to
+         fingerspelling automatically inside the CLI).
+      3. The fingerspelling lexicon bundled with `spoken_to_signed`
+         (every word signed letter-by-letter).
+
+    Fingerspelling is always available as a fallback regardless of which
+    directory is selected, because the CLI wraps the chosen lexicon with a
+    FingerspellingPoseLookup backup.
+    """
+    override = os.environ.get("LEXICON_DIR")
+    if override:
+        return override
+
+    wlasl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lexicon_wlasl")
+    if os.path.isfile(os.path.join(wlasl_dir, "index.csv")):
+        return wlasl_dir
+
+    return _fingerspelling_lexicon_dir()
 
 
 LEXICON_DIR = _resolve_lexicon_dir()
