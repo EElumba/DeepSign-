@@ -1,0 +1,19 @@
+# Dependencies for the OFFLINE WLASL -> .pose lexicon builder (build_lexicon.py).
+#
+# This stack is separate from the server's requirements.txt and MUST run on
+# Python 3.12 — MediaPipe's legacy Holistic solution (used by pose-format's
+# load_holistic) is not available in the Python 3.13 wheels.
+#
+# Recommended setup (uv handles the 3.12 download automatically):
+#   pip install uv
+#   uv venv .venv-b312 --python 3.12
+#   uv pip install --python .venv-b312/bin/python -r requirements-builder.txt
+#
+# Then run the builder with .venv-b312/bin/python build_lexicon.py ...
+
+pose-format
+mediapipe==0.10.14
+opencv-contrib-python
+numpy
+yt-dlp
+imageio-ffmpeg
