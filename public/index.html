@@ -4,8 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>DeepSign Quest ASL Avatar</title>
-  <script type="module" src="https://unpkg.com/pose-viewer/dist/pose-viewer/pose-viewer.esm.js"></script>
-  <script nomodule src="https://unpkg.com/pose-viewer/dist/pose-viewer/pose-viewer.js"></script>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
@@ -16,7 +14,7 @@
         <span id="statusText">Connecting</span>
         <span id="modeBadge">Typed mode</span>
       </div>
-      <pose-viewer id="poseViewer" autoplay></pose-viewer>
+      <canvas id="signCanvas" aria-label="Procedural two-handed signing skeleton"></canvas>
       <div id="caption" class="caption"></div>
     </section>
 

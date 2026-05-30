@@ -23,6 +23,7 @@ Quest mic or typed text
 - `/audio` WebSocket for raw PCM16 speech streaming to Deepgram.
 - AudioWorklet mic capture at 16 kHz PCM16.
 - Python ASL planner with curated phrase, lexical-sign, fingerspelling, and caption fallbacks.
+- Two-handed planning metadata for symmetrical, alternating symmetrical, and asymmetrical signs.
 - Legacy `.pose` generation through ZurichNLP `spoken-to-signed-translation` when installed.
 - Caption-only fallback when Deepgram or the pose generator is unavailable.
 
@@ -155,6 +156,22 @@ python/motion_library/
 The ASL planner already returns stable units like `SIGN HELP` and
 `FS H-E-L-L-O`, so replacing generated `.pose` clips with curated SignAvatars
 motion clips is a contained change.
+
+Each sign unit also includes a `hands` object:
+
+```json
+{
+  "pattern": "asymmetrical",
+  "active": ["dominant", "non_dominant"],
+  "dominant": { "role": "articulator" },
+  "nonDominant": { "role": "support", "motion": "hold" }
+}
+```
+
+Use `pattern: "symmetrical"` for mirrored two-hand signs like `WORK` or
+`SCHOOL`, `alternating: true` for alternating two-hand signs like `SIGN`, and
+`pattern: "asymmetrical"` for signs where the dominant hand articulates against
+a stable support or target hand, such as `HELP`, `NAME`, or `LEARN`.
 
 ## Reality check
 

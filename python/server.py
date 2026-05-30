@@ -104,6 +104,11 @@ def generate_pose(text: str) -> bytes:
 
 
 def motion_clip_for_unit(unit: dict[str, Any], fallback_text: str, generate: bool) -> dict[str, Any]:
+    hands = unit.get("hands") or {
+        "pattern": "one_handed",
+        "active": ["dominant"],
+    }
+
     if unit["type"] == "sign":
         text = " ".join(unit.get("english") or [unit["gloss"].lower()])
         sign_id = unit["gloss"]
@@ -123,6 +128,9 @@ def motion_clip_for_unit(unit: dict[str, Any], fallback_text: str, generate: boo
         "text": text,
         "format": "pose-v0.2",
         "source": "spoken-to-signed-translation",
+        "hands": hands,
+        "requiresTwoHands": len(hands.get("active", [])) == 2,
+        "motionPattern": hands.get("pattern", "one_handed"),
     }
 
     if not generate:
