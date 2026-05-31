@@ -27,6 +27,7 @@ from pathlib import Path
 os.environ.setdefault("MPLCONFIGDIR", str(Path(os.environ.get("TMPDIR", "/tmp")) / "deepsign-mpl"))
 
 import numpy as np
+from scipy.signal import savgol_filter
 from pose_format import Pose
 from pose_format.numpy.pose_body import NumPyPoseBody
 from pose_format.pose_header import PoseHeader, PoseHeaderDimensions
@@ -153,7 +154,7 @@ def shoulder_width(arr: np.ndarray, width: int, height: int) -> float:
     return float(np.nanmean(distances))
 
 
-def to_pose(arr: np.ndarray, fps: float, width: int, height: int, reduce: bool = True) -> Pose:
+def reorder_landmarks(arr: np.ndarray, width: int, height: int) -> tuple[np.ndarray, np.ndarray]:
     if arr.ndim != 3 or arr.shape[2] != 3:
         raise ValueError(f"expected landmarks shaped (frames, points, 3), got {arr.shape}")
     if arr.shape[1] != V3_POINTS:
@@ -179,6 +180,40 @@ def to_pose(arr: np.ndarray, fps: float, width: int, height: int, reduce: bool =
     confidence[:, 0, TARGET_FACE] = conf[:, SOURCE_FACE]
     confidence[:, 0, TARGET_LEFT_HAND] = conf[:, SOURCE_LEFT_HAND]
     confidence[:, 0, TARGET_RIGHT_HAND] = conf[:, SOURCE_RIGHT_HAND]
+    return data, confidence
+
+
+def smooth_data(data: np.ndarray, confidence: np.ndarray, window: int) -> np.ndarray:
+    if window <= 2 or data.shape[0] < 5:
+        return data
+
+    window = min(window, data.shape[0] if data.shape[0] % 2 else data.shape[0] - 1)
+    if window < 3:
+        return data
+
+    smoothed = data.copy()
+    _, _, points, dims = data.shape
+    for point in range(points):
+        visible = confidence[:, 0, point] > 0
+        if visible.mean() < 0.5:
+            continue
+        for dim in range(dims):
+            series = data[:, 0, point, dim]
+            smoothed[:, 0, point, dim] = savgol_filter(series, window_length=window, polyorder=2, mode="interp")
+    smoothed[confidence <= 0] = 0
+    return smoothed
+
+
+def to_pose(
+    arr: np.ndarray,
+    fps: float,
+    width: int,
+    height: int,
+    reduce: bool = True,
+    smoothing_window: int = 5,
+) -> Pose:
+    data, confidence = reorder_landmarks(arr, width, height)
+    data = smooth_data(data, confidence, smoothing_window)
 
     # The app's current lexicon uses refined holistic headers with a final
     # POSE_WORLD_LANDMARKS component. The Kaggle V3 file has the first 553
@@ -191,6 +226,81 @@ def to_pose(arr: np.ndarray, fps: float, width: int, height: int, reduce: bool =
     )
     pose = Pose(header, NumPyPoseBody(fps=fps, data=data, confidence=confidence))
     return reduce_holistic(pose) if reduce else pose
+
+
+def robust_percentile(values: np.ndarray, percentile: float) -> float:
+    values = values[np.isfinite(values)]
+    if len(values) == 0:
+        return float("inf")
+    return float(np.percentile(values, percentile))
+
+
+def candidate_quality(arr: np.ndarray, args) -> dict[str, float | str]:
+    data, confidence = reorder_landmarks(arr, args.width, args.height)
+    pose_conf = confidence[:, 0, TARGET_POSE]
+    hand_conf = confidence[:, 0, TARGET_LEFT_HAND.start:TARGET_RIGHT_HAND.stop]
+    shoulder_ok = (confidence[:, 0, 11] > 0) & (confidence[:, 0, 12] > 0)
+
+    shoulder_dist = np.array([], dtype=np.float32)
+    if shoulder_ok.any():
+        shoulder_dist = np.linalg.norm(data[shoulder_ok, 0, 11, :2] - data[shoulder_ok, 0, 12, :2], axis=1)
+    shoulder_mean = float(np.nanmean(shoulder_dist)) if len(shoulder_dist) else 0.0
+    shoulder_cv = float(np.nanstd(shoulder_dist) / shoulder_mean) if shoulder_mean > 0 else float("inf")
+
+    visible = confidence[:, 0, :TARGET_RIGHT_HAND.stop] > 0
+    diffs = np.diff(data[:, 0, :TARGET_RIGHT_HAND.stop, :2], axis=0)
+    both_visible = visible[1:] & visible[:-1]
+    jump_values = np.linalg.norm(diffs, axis=-1)[both_visible]
+    jump95 = robust_percentile(jump_values, 95)
+
+    wrist_indices = [15, 16, TARGET_LEFT_HAND.start, TARGET_RIGHT_HAND.start]
+    wrist_jumps = []
+    for wrist in wrist_indices:
+        ok = (confidence[1:, 0, wrist] > 0) & (confidence[:-1, 0, wrist] > 0)
+        if ok.any():
+            wrist_jumps.append(np.linalg.norm(np.diff(data[:, 0, wrist, :2], axis=0)[ok], axis=-1))
+    wrist_jump95 = robust_percentile(np.concatenate(wrist_jumps), 95) if wrist_jumps else float("inf")
+
+    hand_frames = hand_conf.any(axis=1)
+    hand_fraction_value = float(hand_frames.mean()) if len(hand_frames) else 0.0
+    pose_fraction = float(pose_conf.any(axis=1).mean()) if len(pose_conf) else 0.0
+
+    reasons = []
+    if arr.shape[0] < args.min_frames:
+        reasons.append("too few frames")
+    if hand_fraction_value < args.min_hand_fraction:
+        reasons.append(f"hands {hand_fraction_value:.0%}")
+    if shoulder_mean < args.min_shoulder_width:
+        reasons.append(f"shoulders {shoulder_mean:.1f}px")
+    if pose_fraction < args.min_pose_fraction:
+        reasons.append(f"pose {pose_fraction:.0%}")
+    if shoulder_cv > args.max_shoulder_cv:
+        reasons.append(f"shoulder jitter {shoulder_cv:.2f}")
+    if jump95 > args.max_jump:
+        reasons.append(f"jump95 {jump95:.1f}px")
+    if wrist_jump95 > args.max_wrist_jump:
+        reasons.append(f"wrist jump95 {wrist_jump95:.1f}px")
+
+    # Lower is better. Hand visibility is rewarded, but smoothness dominates.
+    score = (
+        jump95
+        + 1.5 * wrist_jump95
+        + 120.0 * shoulder_cv
+        + 80.0 * (1.0 - hand_fraction_value)
+        + 40.0 * (1.0 - pose_fraction)
+        + 0.04 * arr.shape[0]
+    )
+    return {
+        "ok": not reasons,
+        "reasons": "; ".join(reasons),
+        "score": score,
+        "hands": hand_fraction_value,
+        "pose": pose_fraction,
+        "shoulders": shoulder_mean,
+        "shoulder_cv": shoulder_cv,
+        "jump95": jump95,
+        "wrist_jump95": wrist_jump95,
+    }
 
 
 def build(args) -> int:
@@ -248,18 +358,20 @@ def build(args) -> int:
                 log(f"[{idx}/{len(labels)}] {gloss}: no landmark sample")
                 continue
 
-            success = False
+            best = None
             for key, _sample in candidates:
                 arr = landmarks[key]
-                if arr.shape[0] < args.min_frames:
+                quality = candidate_quality(arr, args)
+                if not quality["ok"]:
+                    if args.verbose_rejections:
+                        log(f"      sample {key}: skip {quality['reasons']}")
                     continue
-                hands = hand_fraction(arr)
-                if hands < args.min_hand_fraction:
-                    continue
-                shoulders = shoulder_width(arr, args.width, args.height)
-                if shoulders < args.min_shoulder_width:
-                    log(f"      sample {key}: shoulder width {shoulders:.1f}px (<{args.min_shoulder_width}px), skip")
-                    continue
+
+                if best is None or quality["score"] < best[1]["score"]:
+                    best = (key, quality, arr)
+
+            if best is not None:
+                key, quality, arr = best
                 if not args.dry_run:
                     pose = to_pose(
                         arr,
@@ -267,20 +379,21 @@ def build(args) -> int:
                         width=args.width,
                         height=args.height,
                         reduce=not args.keep_full_holistic,
+                        smoothing_window=args.smoothing_window,
                     )
                     with abs_path.open("wb") as f:
                         pose.write(f)
                     rows.append(row_for(rel_path, gloss))
                     existing_glosses.add(gloss)
                 imported += 1
-                success = True
                 log(
                     f"[{idx}/{len(labels)}] {gloss}: OK sample {key} "
-                    f"({arr.shape[0]} frames, hands {hands:.0%}, shoulders {shoulders:.0f}px)"
+                    f"({arr.shape[0]} frames, hands {quality['hands']:.0%}, "
+                    f"shoulders {quality['shoulders']:.0f}px, jump95 {quality['jump95']:.1f}px, "
+                    f"score {quality['score']:.1f})"
                 )
-                break
 
-            if not success:
+            if best is None:
                 failed += 1
                 log(f"[{idx}/{len(labels)}] {gloss}: no usable candidate")
 
@@ -303,11 +416,17 @@ def parse_args():
     parser.add_argument("--max-candidates", type=int, default=8)
     parser.add_argument("--min-frames", type=int, default=8)
     parser.add_argument("--min-hand-fraction", type=float, default=0.3)
+    parser.add_argument("--min-pose-fraction", type=float, default=0.3)
     parser.add_argument("--min-shoulder-width", type=float, default=40.0)
+    parser.add_argument("--max-shoulder-cv", type=float, default=0.35)
+    parser.add_argument("--max-jump", type=float, default=180.0, help="Reject samples with 95th percentile point jumps above this many pixels.")
+    parser.add_argument("--max-wrist-jump", type=float, default=220.0)
+    parser.add_argument("--smoothing-window", type=int, default=5, help="Odd Savitzky-Golay smoothing window. Use 0 to disable.")
     parser.add_argument("--fps", type=float, default=25.0)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--keep-full-holistic", action="store_true", help="Store all 586 points instead of reduced 178-point poses.")
+    parser.add_argument("--verbose-rejections", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
