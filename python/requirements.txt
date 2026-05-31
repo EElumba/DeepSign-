@@ -1,3 +1,0 @@
-fastapi
-uvicorn[standard]
-git+https://github.com/ZurichNLP/spoken-to-signed-translation
