@@ -147,7 +147,11 @@
     signer.addEventListener('ended$', () => playNext());
 
     // --- Display WebSocket (binary .pose + JSON transcript metadata) ---
-    displayWS = new WebSocket(`ws://${location.host}`);
+    // Use wss:// when the page is served over HTTPS (e.g. Railway), otherwise
+    // the browser blocks the insecure ws:// connection as mixed content and the
+    // status stays stuck on "Connecting".
+    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+    displayWS = new WebSocket(`${wsProto}://${location.host}`);
     displayWS.binaryType = 'arraybuffer';
     displayWS.onopen = () => setStatus('live', 'Live');
     displayWS.onclose = () => setStatus('error', 'Error');
