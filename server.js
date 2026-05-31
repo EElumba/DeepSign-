@@ -16,7 +16,9 @@ if (!DEEPGRAM_API_KEY) {
   process.exit(1);
 }
 
-const POSE_SERVER_URL = process.env.POSE_SERVER_URL || 'http://localhost:8000';
+// Strip trailing slashes so `${POSE_SERVER_URL}/pose` never becomes `//pose`
+// (a double slash 404s on FastAPI/Starlette).
+const POSE_SERVER_URL = (process.env.POSE_SERVER_URL || 'http://localhost:8000').replace(/\/+$/, '');
 const FINAL_FLUSH_DELAY_MS = Number(process.env.FINAL_FLUSH_DELAY_MS || 120);
 const POSE_TIMEOUT_MS = Number(process.env.POSE_TIMEOUT_MS || 30000);
 
