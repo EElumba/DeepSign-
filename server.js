@@ -17,6 +17,8 @@ if (!DEEPGRAM_API_KEY) {
 }
 
 const POSE_SERVER_URL = process.env.POSE_SERVER_URL || 'http://localhost:8000';
+const FINAL_FLUSH_DELAY_MS = Number(process.env.FINAL_FLUSH_DELAY_MS || 120);
+const POSE_TIMEOUT_MS = Number(process.env.POSE_TIMEOUT_MS || 30000);
 
 const deepgram = createClient(DEEPGRAM_API_KEY);
 
@@ -27,6 +29,7 @@ const deepgram = createClient(DEEPGRAM_API_KEY);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const GLOSS_TIMEOUT_MS = Number(process.env.GLOSS_TIMEOUT_MS || 1500);
+const GLOSS_CACHE_SIZE = Math.max(0, Number(process.env.GLOSS_CACHE_SIZE || 128));
 
 const openai = OPENAI_API_KEY
   ? new OpenAI({ apiKey: OPENAI_API_KEY, timeout: GLOSS_TIMEOUT_MS, maxRetries: 0 })
@@ -50,10 +53,26 @@ const GLOSS_SYSTEM_PROMPT =
 // Cache so repeated phrases ("hello", "thank you") cost nothing after the first.
 const glossCache = new Map();
 
+const DIGIT_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+
+function expandDigitsForSigning(text) {
+  return text.replace(/\d+/g, (digits) => (
+    digits
+      .split('')
+      .map((digit) => DIGIT_WORDS[Number(digit)])
+      .join(' ')
+  ));
+}
+
 async function englishToAslGloss(text) {
   if (!openai) return text;
   const key = text.toLowerCase().trim();
-  if (glossCache.has(key)) return glossCache.get(key);
+  if (glossCache.has(key)) {
+    const cached = glossCache.get(key);
+    glossCache.delete(key);
+    glossCache.set(key, cached);
+    return cached;
+  }
   try {
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
@@ -66,7 +85,12 @@ async function englishToAslGloss(text) {
     });
     const gloss = completion.choices?.[0]?.message?.content?.trim();
     const result = gloss && gloss.length ? gloss : text;
-    glossCache.set(key, result);
+    if (GLOSS_CACHE_SIZE > 0) {
+      glossCache.set(key, result);
+      while (glossCache.size > GLOSS_CACHE_SIZE) {
+        glossCache.delete(glossCache.keys().next().value);
+      }
+    }
     return result;
   } catch (err) {
     console.error('[Gloss] OpenAI failed, using raw text:', err.message);
@@ -91,11 +115,14 @@ let poseGeneration = 0;
 // Ask the Python server to turn text into a .pose binary. Returns an
 // ArrayBuffer, or null on failure (caller should skip the broadcast).
 async function generatePose(text) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), POSE_TIMEOUT_MS);
   try {
     const res = await fetch(`${POSE_SERVER_URL}/pose`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
+      signal: controller.signal,
     });
     if (!res.ok) {
       console.error(`[Pose] Python server error: ${res.status}`);
@@ -103,8 +130,13 @@ async function generatePose(text) {
     }
     return await res.arrayBuffer();
   } catch (err) {
-    console.error('[Pose] Failed to reach Python server:', err.message);
+    const message = err.name === 'AbortError'
+      ? `Timed out after ${POSE_TIMEOUT_MS}ms`
+      : err.message;
+    console.error('[Pose] Failed to reach Python server:', message);
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -153,12 +185,17 @@ wss.on('connection', (ws, request) => {
   // signs), and on disconnect. Each utterance is glossed to ASL then signed.
   const MAX_BUFFERED_WORDS = 16;
   let wordBuffer = [];
+  let finalFlushTimer = null;
   // Serialize gloss+pose generation per connection so clips are broadcast in order.
   let poseChain = Promise.resolve();
 
   const session = {
     reset() {
       wordBuffer = [];
+      if (finalFlushTimer) {
+        clearTimeout(finalFlushTimer);
+        finalFlushTimer = null;
+      }
       poseChain = Promise.resolve();
     },
   };
@@ -168,7 +205,8 @@ wss.on('connection', (ws, request) => {
     const generation = poseGeneration;
     poseChain = poseChain
       .then(async () => {
-        const gloss = await englishToAslGloss(text);
+        const signableText = expandDigitsForSigning(text);
+        const gloss = expandDigitsForSigning(await englishToAslGloss(signableText));
         if (gloss !== text) console.log(`[Gloss] "${text}" -> "${gloss}"`);
         const arrayBuffer = await generatePose(gloss);
         if (arrayBuffer && generation === poseGeneration) {
@@ -179,9 +217,18 @@ wss.on('connection', (ws, request) => {
   }
 
   function flushUtterance() {
+    if (finalFlushTimer) {
+      clearTimeout(finalFlushTimer);
+      finalFlushTimer = null;
+    }
     if (wordBuffer.length > 0) {
       enqueuePose(wordBuffer.splice(0).join(' '));
     }
+  }
+
+  function scheduleFinalFlush() {
+    if (finalFlushTimer || FINAL_FLUSH_DELAY_MS < 0) return;
+    finalFlushTimer = setTimeout(flushUtterance, FINAL_FLUSH_DELAY_MS);
   }
 
   let dgLive;
@@ -215,13 +262,17 @@ wss.on('connection', (ws, request) => {
       // Only finalized words feed the pose pipeline (interim words can change).
       if (!data.is_final) return;
 
-      const words = transcript.trim().split(/\s+/).filter(Boolean);
+      const signableTranscript = expandDigitsForSigning(transcript);
+      const words = signableTranscript.trim().split(/\s+/).filter(Boolean);
       if (words.length) wordBuffer.push(...words);
 
-      // Flush a full utterance at end-of-speech, or when the buffer gets long
-      // enough that we shouldn't keep waiting.
+      // Flush immediately at end-of-speech or when the buffer gets long enough.
+      // Otherwise, flush shortly after finalized text so the avatar starts
+      // signing before Deepgram's endpoint detector notices a full pause.
       if (data.speech_final || wordBuffer.length >= MAX_BUFFERED_WORDS) {
         flushUtterance();
+      } else {
+        scheduleFinalFlush();
       }
     });
 

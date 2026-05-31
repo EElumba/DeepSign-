@@ -17,7 +17,7 @@
       height: 100vh;
       display: flex; flex-direction: column; align-items: center;
     }
-    .wrap { width: 100%; max-width: 400px; padding: 12px; display: flex; flex-direction: column; gap: 10px; height: 100%; }
+    .wrap { width: 100%; max-width: 504px; padding: 12px; display: flex; flex-direction: column; gap: 10px; height: 100%; }
     #bar { display: flex; align-items: center; font-size: 13px; }
     #dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; background: #888; }
     #dot.live { background: #2ecc71; }
@@ -27,8 +27,20 @@
       max-height: 2.6em; overflow: hidden;
       background: rgba(255,255,255,0.06); border-radius: 6px; padding: 6px 8px;
     }
-    pose-viewer { width: 100%; height: 300px; background: #111; border-radius: 6px; flex: 1; }
-    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    pose-viewer {
+      display: block;
+      width: 100%;
+      height: calc(min(100vw, 504px) - 24px);
+      min-height: calc(min(100vw, 504px) - 24px);
+      max-height: calc(min(100vw, 504px) - 24px);
+      aspect-ratio: 1 / 1;
+      overflow: hidden;
+      contain: layout size paint;
+      background: #111;
+      border-radius: 6px;
+      flex: 0 0 auto;
+    }
+    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; flex: 0 0 auto; }
     button {
       padding: 12px; font-size: 14px; font-weight: 600; font-family: monospace;
       color: #fff; border: none; border-radius: 8px; cursor: pointer;

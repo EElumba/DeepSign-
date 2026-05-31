@@ -91,9 +91,9 @@ def row_for(rel_path: str, gloss: str) -> dict[str, str | int]:
     }
 
 
-def load_label_order(source_dir: Path, parsed: list[dict], requested: set[str] | None) -> list[str]:
+def load_label_order(source_dir: Path, parsed: list[dict], requested: set[str] | None, use_filtered_labels: bool) -> list[str]:
     labels_path = source_dir / "filtered_labels.txt"
-    if labels_path.is_file():
+    if use_filtered_labels and labels_path.is_file():
         labels = [line.strip().lower() for line in labels_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     else:
         counts = defaultdict(int)
@@ -339,12 +339,15 @@ def build(args) -> int:
 
     with np.load(landmarks_path) as landmarks:
         samples_by_gloss = available_samples(parsed, set(landmarks.keys()))
-        labels = load_label_order(source_dir, parsed, requested)
+        labels = load_label_order(source_dir, parsed, requested, not args.all_labels)
         if args.num_glosses:
             labels = labels[: args.num_glosses]
 
         log(f"Importing {len(labels)} requested gloss(es) from {landmarks_path}")
         for idx, gloss in enumerate(labels, 1):
+            if args.target_total and len(existing_glosses) >= args.target_total:
+                break
+
             rel_path = f"ase/{slugify(gloss)}.pose"
             abs_path = out_dir / rel_path
             if gloss in existing_glosses and not args.overwrite:
@@ -411,8 +414,10 @@ def parse_args():
     parser.add_argument("--out", default="lexicon_wlasl")
     parser.add_argument("--version", default="V3", choices=["V3"])
     parser.add_argument("--num-glosses", type=int, default=None, help="Import the first N labels from filtered_labels.txt.")
+    parser.add_argument("--target-total", type=int, default=None, help="Keep importing missing glosses until the index reaches this many unique entries.")
     parser.add_argument("--glosses", default=None, help="Comma-separated glosses to import.")
     parser.add_argument("--glosses-file", default=None, help="Text file with one gloss per line to import.")
+    parser.add_argument("--all-labels", action="store_true", help="Use all parsed WLASL labels ordered by sample count instead of filtered_labels.txt.")
     parser.add_argument("--max-candidates", type=int, default=8)
     parser.add_argument("--min-frames", type=int, default=8)
     parser.add_argument("--min-hand-fraction", type=float, default=0.3)
