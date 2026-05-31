@@ -101,8 +101,30 @@ async function englishToAslGloss(text) {
 }
 
 const app = express();
-app.get('/', (req, res) => {
+
+// Speaker/controller page (phone or laptop): captures the mic and streams audio.
+// Meta Ray-Ban Display Web Apps cannot access the microphone, so voice capture
+// must happen here, not on the glasses.
+app.get(['/', '/speak'], (req, res) => {
   res.sendFile(join(__dirname, 'index.html'));
+});
+
+// Glasses display page: the Meta Ray-Ban Display Web App URL. Display-only
+// (no mic), 600x600, optimized for the see-through waveguide. Add THIS URL in
+// the Meta AI app (Developer Mode) → Display Glasses → App connections.
+app.get('/glasses', (req, res) => {
+  res.sendFile(join(__dirname, 'glasses.html'));
+});
+
+// Web App manifest + favicon (the glasses runtime requires a PNG icon; SVG is
+// not supported).
+app.get('/manifest.webmanifest', (req, res) => {
+  res.type('application/manifest+json').sendFile(join(__dirname, 'manifest.webmanifest'));
+});
+app.get('/icon.png', (req, res) => {
+  res.sendFile(join(__dirname, 'public', 'icon.png'), (err) => {
+    if (err) res.status(404).end();
+  });
 });
 
 const server = createServer(app);
@@ -322,5 +344,6 @@ server.listen(PORT, () => {
   console.log(`ASL Pose MVP server listening on http://localhost:${PORT}`);
   console.log(`Make sure the Python pose server is running first:`);
   console.log(`  cd python && uvicorn server:app --port 8000`);
-  console.log(`On the Meta glasses browser, open http://YOUR_LOCAL_IP:${PORT} and grant mic permission.`);
+  console.log(`Speaker page (mic, phone/laptop): /  or  /speak  — grant mic permission.`);
+  console.log(`Glasses page (Meta Ray-Ban Display Web App URL): /glasses  — display only.`);
 });

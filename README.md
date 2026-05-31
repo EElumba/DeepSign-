@@ -69,13 +69,38 @@ Wait for: `Application startup complete.` (the first request is pre-warmed on st
 npm start
 ```
 
-## Open on Meta glasses
+## Open on Meta Ray-Ban Display glasses (Web App)
 
-```
-http://YOUR_LOCAL_IP:3000
-```
+Meta Ray-Ban **Display** glasses run standalone Web Apps loaded by URL through
+the Meta AI app. Per Meta's [Web Apps docs](https://wearables.developer.meta.com/docs/develop/webapps),
+**Web Apps cannot access the microphone or camera** (those need the native
+Device Access Toolkit). So the app is split into two roles:
 
-Grant mic permission, tap **Start**, and speak — the avatar signs.
+| Page | Where it runs | Purpose |
+| --- | --- | --- |
+| `/speak` (or `/`) | Phone/laptop browser | Captures the mic, streams audio → Deepgram |
+| `/glasses` | Meta Ray-Ban Display | Display-only: renders the signing avatar + captions |
+
+Both connect to the same Node WebSocket server, so speaking on the phone makes
+the glasses avatar sign — the glasses are the **receiver/display**.
+
+The `/glasses` page follows the platform constraints: fixed **600×600** viewport,
+no scrolling, black background (renders transparent on the waveguide) with
+bright high-contrast UI, and **arrow-key/Enter** focusable controls (Neural Band
+/ captouch). It auto-connects and auto-reconnects — no mic prompt.
+
+### Load it on the glasses
+
+1. Deploy over **HTTPS** (Railway already does this).
+2. In the **Meta AI app** → Settings → App Info, tap the version number **5×** to enable **Developer Mode**.
+3. In the Meta AI app → your **Display Glasses** → **App connections → Web apps → Add a web app**, enter:
+   ```
+   https://<your-railway-domain>/glasses
+   ```
+4. On your phone/laptop, open `https://<your-railway-domain>/speak`, tap **Start**, grant mic permission, and speak — the glasses sign in real time.
+
+> Requirements (Meta docs): glasses software **v125+**, Meta AI app **v272+**.
+> You can preview `/glasses` in a desktop browser sized to 600×600 before loading it on-device.
 
 ## Test the Python server independently
 
