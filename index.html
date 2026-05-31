@@ -9,8 +9,8 @@
   <script type="module" src="https://unpkg.com/pose-viewer/dist/pose-viewer/pose-viewer.esm.js"></script>
   <script nomodule src="https://unpkg.com/pose-viewer/dist/pose-viewer/pose-viewer.js"></script>
 
-  <!-- Sign→Speak: MediaPipe Holistic + drawing utils -->
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+  <!-- Sign→Speak: MediaPipe Hands + drawing utils -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
 
   <style>
@@ -304,14 +304,13 @@ function setSignStatus(msg) { signStatus.textContent = msg; }
 async function startCamera() {
   if (!holistic) {
     setSignStatus('Loading pose model…');
-    holistic = new Holistic({
-      locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${f}`,
+    holistic = new Hands({
+      locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`,
     });
     holistic.setOptions({
+      maxNumHands: 2,
       modelComplexity: 1,
-      smoothLandmarks: true,
-      refineFaceLandmarks: false,
-      minDetectionConfidence: 0.5,
+      minDetectionConfidence: 0.7,
       minTrackingConfidence: 0.5,
     });
     holistic.onResults(onSignResults);
@@ -362,31 +361,25 @@ function onSignResults(results) {
   const W = signCanvas.width, H = signCanvas.height;
   signCtx.clearRect(0, 0, W, H);
 
-  // Draw video mirrored so it feels like a selfie camera
+  // Draw video mirrored (selfie orientation)
   signCtx.save();
   signCtx.translate(W, 0);
   signCtx.scale(-1, 1);
   signCtx.drawImage(results.image, 0, 0, W, H);
   signCtx.restore();
 
-  // Mirror landmark x coordinates to match the flipped video
-  const mx = (lms) => lms ? lms.map(p => ({ ...p, x: 1 - p.x })) : null;
+  // Mirror landmark x to match the flipped video
+  const mx = (lms) => lms.map(p => ({ ...p, x: 1 - p.x }));
 
-  if (results.poseLandmarks) {
-    drawConnectors(signCtx, mx(results.poseLandmarks), POSE_CONNECTIONS,
-      { color: '#00CC44', lineWidth: 2 });
-  }
-  if (results.leftHandLandmarks) {
-    drawConnectors(signCtx, mx(results.leftHandLandmarks), HAND_CONNECTIONS,
-      { color: '#CC2222', lineWidth: 2 });
-    drawLandmarks(signCtx, mx(results.leftHandLandmarks),
-      { color: '#FF5555', lineWidth: 1, radius: 3 });
-  }
-  if (results.rightHandLandmarks) {
-    drawConnectors(signCtx, mx(results.rightHandLandmarks), HAND_CONNECTIONS,
-      { color: '#2244CC', lineWidth: 2 });
-    drawLandmarks(signCtx, mx(results.rightHandLandmarks),
-      { color: '#5577FF', lineWidth: 1, radius: 3 });
+  // Draw each detected hand — alternating colours so two hands are distinct
+  const connColors = ['#CC2222', '#2244CC'];
+  const dotColors  = ['#FF5555', '#5577FF'];
+  for (let i = 0; i < (results.multiHandLandmarks || []).length; i++) {
+    const lms = results.multiHandLandmarks[i];
+    drawConnectors(signCtx, mx(lms), HAND_CONNECTIONS,
+      { color: connColors[i % 2], lineWidth: 3 });
+    drawLandmarks(signCtx, mx(lms),
+      { color: dotColors[i % 2], lineWidth: 1, radius: 4 });
   }
 
   processSignFrame(results);
@@ -395,32 +388,42 @@ function onSignResults(results) {
 // ── Sign segmentation (velocity-based) ───────────────────────────────── //
 
 function processSignFrame(results) {
-  const lh   = results.leftHandLandmarks;
-  const rh   = results.rightHandLandmarks;
-  const pose = results.poseLandmarks;
+  const hands      = results.multiHandLandmarks || [];
+  const handedness = results.multiHandedness    || [];
 
-  const lw = pose ? pose[15] : null; // left wrist
-  const rw = pose ? pose[16] : null; // right wrist
-
-  let velocity = 0;
-  if (prevWrists) {
-    if (lw && prevWrists.lw) velocity += Math.hypot(lw.x - prevWrists.lw.x, lw.y - prevWrists.lw.y);
-    if (rw && prevWrists.rw) velocity += Math.hypot(rw.x - prevWrists.rw.x, rw.y - prevWrists.rw.y);
-    velocity /= 2;
+  // Map detected hands to left / right using MediaPipe's labels
+  // ('Left' = person's left hand, 'Right' = person's right hand)
+  let leftHand = null, rightHand = null;
+  for (let i = 0; i < hands.length; i++) {
+    const lms = hands[i].map(p => [p.x, p.y, p.z]);
+    if (handedness[i]?.label === 'Left')  leftHand  = lms;
+    else                                   rightHand = lms;
   }
-  prevWrists = { lw: lw || null, rw: rw || null };
 
-  const handsVisible = !!(lh || rh);
+  // Velocity: track each hand's wrist (landmark 0) frame-over-frame
+  const currentWrists = hands.map(lms => ({ x: lms[0].x, y: lms[0].y }));
+  let velocity = 0;
+  if (prevWrists && prevWrists.length > 0 && currentWrists.length > 0) {
+    for (const cw of currentWrists) {
+      let minDist = Infinity;
+      for (const pw of prevWrists) {
+        const d = Math.hypot(cw.x - pw.x, cw.y - pw.y);
+        if (d < minDist) minDist = d;
+      }
+      velocity += minDist;
+    }
+    velocity /= currentWrists.length;
+  }
+  prevWrists = currentWrists;
+
+  const handsVisible = currentWrists.length > 0;
   const isActive     = handsVisible && velocity > VELOCITY_THRESHOLD;
 
   if (isActive) {
     if (!signActive) setSignStatus('Signing…');
     signActive    = true;
     signRestCount = 0;
-    signFrameBuffer.push({
-      left_hand:  lh ? lh.map(p => [p.x, p.y, p.z]) : null,
-      right_hand: rh ? rh.map(p => [p.x, p.y, p.z]) : null,
-    });
+    signFrameBuffer.push({ left_hand: leftHand, right_hand: rightHand });
     if (signFrameBuffer.length >= MAX_SIGN_FRAMES) flushSignBuffer();
   } else if (signActive) {
     signRestCount++;
@@ -527,7 +530,7 @@ signResetBtn.addEventListener('click', () => {
   signFrameBuffer = [];
   signActive      = false;
   signRestCount   = 0;
-  prevWrists      = null;
+  prevWrists      = [];
   glossDisplay.textContent  = '';
   englishOutput.textContent = '';
   setSignStatus(signRunning ? 'Watching… sign a word!' : 'Start camera to begin signing.');
