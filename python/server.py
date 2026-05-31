@@ -5,7 +5,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from typing import Optional
 
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -17,6 +19,14 @@ PORT = int(os.environ.get("PORT", "8000"))
 # pose's stored fps, so raising fps makes the avatar sign faster without
 # dropping any motion. 1.0 = native speed; 1.6 ≈ 60% faster. Tune via env.
 SIGN_SPEED = float(os.environ.get("SIGN_SPEED", "1.6"))
+
+# WLASL clips come from different videos/signers, so their face landmarks can
+# describe different-sized heads even after the canvas dimensions are normalized.
+# Normalize the face component at runtime so the avatar head does not grow or
+# shrink between words.
+TARGET_FACE_HEIGHT = float(os.environ.get("TARGET_FACE_HEIGHT", "120"))
+STABILIZE_FACE_SIZE = os.environ.get("STABILIZE_FACE_SIZE", "1").lower() not in ("0", "false", "no")
+AVATAR_Y_OFFSET = float(os.environ.get("AVATAR_Y_OFFSET", "-45"))
 
 
 def _fingerspelling_lexicon_dir() -> str:
@@ -128,29 +138,107 @@ def generate_pose(text: str) -> bytes:
         if result.returncode != 0:
             raise RuntimeError(f"text_to_gloss_to_pose failed: {result.stderr}")
         with open(out_path, "rb") as f:
-            return _apply_speed(f.read())
+            return _postprocess_pose(f.read())
     finally:
         if os.path.exists(out_path):
             os.unlink(out_path)
 
 
-def _apply_speed(pose_bytes: bytes) -> bytes:
-    """Speed up the avatar by raising the pose's stored fps. pose-viewer plays
-    back at body.fps, so a higher value plays the same frames in less time.
-    """
-    if SIGN_SPEED == 1.0:
-        return pose_bytes
+def _postprocess_pose(pose_bytes: bytes) -> bytes:
+    """Apply runtime cleanup passes to generated pose bytes."""
     try:
         from pose_format import Pose
 
         pose = Pose.read(pose_bytes)
-        pose.body.fps = pose.body.fps * SIGN_SPEED
+        if STABILIZE_FACE_SIZE:
+            _stabilize_face_size(pose)
+        if AVATAR_Y_OFFSET:
+            _shift_avatar_y(pose, AVATAR_Y_OFFSET)
+        if SIGN_SPEED != 1.0:
+            pose.body.fps = pose.body.fps * SIGN_SPEED
+
         buf = io.BytesIO()
         pose.write(buf)
         return buf.getvalue()
     except Exception as e:
-        print(f"[Pose] Speed-up skipped: {e}")
+        print(f"[Pose] Postprocess skipped: {e}")
         return pose_bytes
+
+
+def _component_slice(pose, component_name: str) -> Optional[slice]:
+    offset = 0
+    for component in pose.header.components:
+        count = len(component.points)
+        if component.name == component_name:
+            return slice(offset, offset + count)
+        offset += count
+    return None
+
+
+def _image_space_slices(pose):
+    offset = 0
+    for component in pose.header.components:
+        count = len(component.points)
+        if "WORLD" not in component.name.upper():
+            yield slice(offset, offset + count)
+        offset += count
+
+
+def _shift_avatar_y(pose, offset: float) -> None:
+    """Shift image-space landmarks vertically inside the pose canvas."""
+    for point_slice in _image_space_slices(pose):
+        visible = pose.body.confidence[:, :, point_slice] > 0
+        y = pose.body.data[:, :, point_slice, 1]
+        y[visible] = y[visible] + offset
+
+
+def _stabilize_face_size(pose) -> None:
+    """Keep face landmark height stable while preserving per-frame head motion."""
+    if TARGET_FACE_HEIGHT <= 0:
+        return
+
+    face_slice = _component_slice(pose, "FACE_LANDMARKS")
+    if face_slice is None:
+        return
+
+    data = pose.body.data[:, :, face_slice, :]
+    confidence = pose.body.confidence[:, :, face_slice]
+    visible = confidence > 0
+
+    for frame_index in range(data.shape[0]):
+        for person_index in range(data.shape[1]):
+            frame_visible = visible[frame_index, person_index]
+            if frame_visible.sum() < 20:
+                continue
+
+            points = data[frame_index, person_index]
+            frame_confidence = confidence[frame_index, person_index]
+            visible_indices = np.flatnonzero(frame_visible)
+            xy = points[visible_indices, :2]
+            valid = np.isfinite(xy).all(axis=1) & (np.abs(xy).sum(axis=1) > 0)
+            invalid_indices = visible_indices[~valid]
+            if len(invalid_indices):
+                frame_confidence[invalid_indices] = 0
+            visible_indices = visible_indices[valid]
+            xy = xy[valid]
+            if len(xy) < 20:
+                continue
+
+            min_xy = np.percentile(xy, 2, axis=0)
+            max_xy = np.percentile(xy, 98, axis=0)
+            face_height = float(max_xy[1] - min_xy[1])
+            if face_height <= 1:
+                continue
+
+            scale = TARGET_FACE_HEIGHT / face_height
+            if not np.isfinite(scale):
+                continue
+            # Keep outlier detections from causing dramatic warps.
+            scale = float(np.clip(scale, 0.65, 1.45))
+
+            center = (min_xy + max_xy) / 2
+            points[visible_indices, :2] = (points[visible_indices, :2] - center) * scale + center
+            points[visible_indices, 2] = points[visible_indices, 2] * scale
 
 
 @app.on_event("startup")

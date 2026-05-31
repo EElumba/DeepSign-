@@ -17,6 +17,7 @@ if (!DEEPGRAM_API_KEY) {
 }
 
 const POSE_SERVER_URL = process.env.POSE_SERVER_URL || 'http://localhost:8000';
+const FINAL_FLUSH_DELAY_MS = Number(process.env.FINAL_FLUSH_DELAY_MS || 120);
 
 const deepgram = createClient(DEEPGRAM_API_KEY);
 
@@ -164,12 +165,17 @@ wss.on('connection', (ws, request) => {
   // signs), and on disconnect. Each utterance is glossed to ASL then signed.
   const MAX_BUFFERED_WORDS = 16;
   let wordBuffer = [];
+  let finalFlushTimer = null;
   // Serialize gloss+pose generation per connection so clips are broadcast in order.
   let poseChain = Promise.resolve();
 
   const session = {
     reset() {
       wordBuffer = [];
+      if (finalFlushTimer) {
+        clearTimeout(finalFlushTimer);
+        finalFlushTimer = null;
+      }
       poseChain = Promise.resolve();
     },
   };
@@ -191,9 +197,18 @@ wss.on('connection', (ws, request) => {
   }
 
   function flushUtterance() {
+    if (finalFlushTimer) {
+      clearTimeout(finalFlushTimer);
+      finalFlushTimer = null;
+    }
     if (wordBuffer.length > 0) {
       enqueuePose(wordBuffer.splice(0).join(' '));
     }
+  }
+
+  function scheduleFinalFlush() {
+    if (finalFlushTimer || FINAL_FLUSH_DELAY_MS < 0) return;
+    finalFlushTimer = setTimeout(flushUtterance, FINAL_FLUSH_DELAY_MS);
   }
 
   let dgLive;
@@ -231,10 +246,13 @@ wss.on('connection', (ws, request) => {
       const words = signableTranscript.trim().split(/\s+/).filter(Boolean);
       if (words.length) wordBuffer.push(...words);
 
-      // Flush a full utterance at end-of-speech, or when the buffer gets long
-      // enough that we shouldn't keep waiting.
+      // Flush immediately at end-of-speech or when the buffer gets long enough.
+      // Otherwise, flush shortly after finalized text so the avatar starts
+      // signing before Deepgram's endpoint detector notices a full pause.
       if (data.speech_final || wordBuffer.length >= MAX_BUFFERED_WORDS) {
         flushUtterance();
+      } else {
+        scheduleFinalFlush();
       }
     });
 
