@@ -72,22 +72,30 @@ npm start
 ## Open on Meta Ray-Ban Display glasses (Web App)
 
 Meta Ray-Ban **Display** glasses run standalone Web Apps loaded by URL through
-the Meta AI app. Per Meta's [Web Apps docs](https://wearables.developer.meta.com/docs/develop/webapps),
-**Web Apps cannot access the microphone or camera** (those need the native
-Device Access Toolkit). So the app is split into two roles:
+the Meta AI app. There are two ways to use the app:
 
 | Page | Where it runs | Purpose |
 | --- | --- | --- |
-| `/speak` (or `/`) | Phone/laptop browser | Captures the mic, streams audio → Deepgram |
-| `/glasses` | Meta Ray-Ban Display | Display-only: renders the signing avatar + captions |
+| `/glasses` | Meta Ray-Ban Display | Capture **and** display: tries the on-glasses mic, signs the avatar + captions |
+| `/speak` (or `/`) | Phone/laptop browser | Companion mic page (fallback / second speaker) |
 
-Both connect to the same Node WebSocket server, so speaking on the phone makes
-the glasses avatar sign — the glasses are the **receiver/display**.
+Both connect to the same Node WebSocket server.
+
+**On the mic:** Meta's current [Web Apps docs](https://wearables.developer.meta.com/docs/develop/webapps/build)
+still list **Microphone** under *Unsupported Capabilities* for the Web App path
+(mic/camera are documented as native Device Access Toolkit only). The `/glasses`
+page nonetheless requests the mic directly via `getUserMedia` from a user gesture
+(the **Start** press, as the docs require for permission prompts):
+
+- If your glasses firmware exposes the mic, it captures and signs **fully on-device**.
+- If the runtime blocks it, the page falls back to **display-only** and prompts
+  you to open `/speak` on your phone.
 
 The `/glasses` page follows the platform constraints: fixed **600×600** viewport,
-no scrolling, black background (renders transparent on the waveguide) with
-bright high-contrast UI, and **arrow-key/Enter** focusable controls (Neural Band
-/ captouch). It auto-connects and auto-reconnects — no mic prompt.
+no scrolling, black background (renders transparent on the waveguide) with bright
+high-contrast UI, **88px** minimum targets, and **arrow-key/Enter** D-pad focus
+navigation between the focusable **Start** and **Reset** controls (Neural Band /
+captouch). It auto-connects and auto-reconnects.
 
 ### Load it on the glasses
 
@@ -97,7 +105,7 @@ bright high-contrast UI, and **arrow-key/Enter** focusable controls (Neural Band
    ```
    https://<your-railway-domain>/glasses
    ```
-4. On your phone/laptop, open `https://<your-railway-domain>/speak`, tap **Start**, grant mic permission, and speak — the glasses sign in real time.
+4. On the glasses, focus **Start** (D-pad) and press **Enter** to grant mic permission and begin signing on-device. If the mic is blocked, open `https://<your-railway-domain>/speak` on your phone instead, tap **Start**, and speak — the glasses sign in real time.
 
 > Requirements (Meta docs): glasses software **v125+**, Meta AI app **v272+**.
 > You can preview `/glasses` in a desktop browser sized to 600×600 before loading it on-device.
