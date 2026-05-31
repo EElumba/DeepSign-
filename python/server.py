@@ -37,6 +37,28 @@ AVATAR_Y_OFFSET = float(os.environ.get("AVATAR_Y_OFFSET", "-45"))
 POSE_CACHE_SIZE = max(0, int(os.environ.get("POSE_CACHE_SIZE", "128")))
 POSE_GENERATION_TIMEOUT = float(os.environ.get("POSE_GENERATION_TIMEOUT", "30"))
 
+# Replace MediaPipe Holistic's dense 478-point face mesh (the "Google" tessellation,
+# ~2500 connections) with a clean ~14-point cartoon face: outline, eyes, nose, and
+# mouth. Far more legible on the avatar — especially on the additive glasses display.
+SIMPLE_FACE = os.environ.get("SIMPLE_FACE", "1").lower() not in ("0", "false", "no")
+
+# Ordered (label, MediaPipe FaceMesh index) for the simplified face. The limb
+# indices below are positions into THIS list, so order matters.
+SIMPLE_FACE_POINTS = [
+    ("face_top", "10"), ("chin", "152"), ("cheek_r", "234"), ("cheek_l", "454"),
+    ("eye_r_outer", "33"), ("eye_r_inner", "133"),
+    ("eye_l_inner", "362"), ("eye_l_outer", "263"),
+    ("nose_top", "168"), ("nose_tip", "1"),
+    ("mouth_r", "61"), ("mouth_l", "291"), ("mouth_top", "13"), ("mouth_bottom", "14"),
+]
+SIMPLE_FACE_LIMBS = [
+    (0, 2), (2, 1), (1, 3), (3, 0),          # face outline
+    (4, 5), (6, 7),                          # eyes
+    (8, 9),                                  # nose bridge → tip
+    (10, 12), (12, 11), (11, 13), (13, 10),  # mouth
+]
+SIMPLE_FACE_COLOR = (255, 255, 255)
+
 _pose_cache: OrderedDict[str, bytes] = OrderedDict()
 _pose_cache_lock = Lock()
 
@@ -208,6 +230,10 @@ def _postprocess_pose(pose_bytes: bytes) -> bytes:
             _stabilize_body_size(pose)
         if STABILIZE_FACE_SIZE:
             _stabilize_face_size(pose)
+        # Simplify after stabilization (which needs the dense mesh) but before the
+        # Y-shift, which operates on whatever components the pose currently has.
+        if SIMPLE_FACE:
+            pose = _simplify_face(pose)
         if AVATAR_Y_OFFSET:
             _shift_avatar_y(pose, AVATAR_Y_OFFSET)
         if SIGN_SPEED != 1.0:
@@ -219,6 +245,41 @@ def _postprocess_pose(pose_bytes: bytes) -> bytes:
     except Exception as e:
         print(f"[Pose] Postprocess skipped: {e}")
         return pose_bytes
+
+
+def _simplify_face(pose):
+    """Swap the dense FACE_LANDMARKS mesh for a clean ~14-point cartoon face.
+
+    Returns a new Pose with the simplified face, or the original pose unchanged
+    if the face component is missing or any expected landmark is absent.
+    """
+    from pose_format.pose_header import PoseHeaderComponent
+
+    face = next((c for c in pose.header.components if c.name == "FACE_LANDMARKS"), None)
+    if face is None:
+        return pose
+
+    available = set(face.points)
+    selected = [mp_index for _, mp_index in SIMPLE_FACE_POINTS]
+    if not all(idx in available for idx in selected):
+        # Unexpected face point layout — leave the pose as-is rather than
+        # building a face with misaligned limbs.
+        return pose
+
+    component_names = [c.name for c in pose.header.components]
+    reduced = pose.get_components(component_names, {"FACE_LANDMARKS": selected})
+
+    for i, component in enumerate(reduced.header.components):
+        if component.name == "FACE_LANDMARKS":
+            reduced.header.components[i] = PoseHeaderComponent(
+                "FACE_LANDMARKS",
+                component.points,
+                list(SIMPLE_FACE_LIMBS),
+                [SIMPLE_FACE_COLOR],
+                component.format,
+            )
+            break
+    return reduced
 
 
 def _component_slice(pose, component_name: str) -> Optional[slice]:
