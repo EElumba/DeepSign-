@@ -50,6 +50,17 @@ const GLOSS_SYSTEM_PROMPT =
 // Cache so repeated phrases ("hello", "thank you") cost nothing after the first.
 const glossCache = new Map();
 
+const DIGIT_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+
+function expandDigitsForSigning(text) {
+  return text.replace(/\d+/g, (digits) => (
+    digits
+      .split('')
+      .map((digit) => DIGIT_WORDS[Number(digit)])
+      .join(' ')
+  ));
+}
+
 async function englishToAslGloss(text) {
   if (!openai) return text;
   const key = text.toLowerCase().trim();
@@ -168,7 +179,8 @@ wss.on('connection', (ws, request) => {
     const generation = poseGeneration;
     poseChain = poseChain
       .then(async () => {
-        const gloss = await englishToAslGloss(text);
+        const signableText = expandDigitsForSigning(text);
+        const gloss = expandDigitsForSigning(await englishToAslGloss(signableText));
         if (gloss !== text) console.log(`[Gloss] "${text}" -> "${gloss}"`);
         const arrayBuffer = await generatePose(gloss);
         if (arrayBuffer && generation === poseGeneration) {
@@ -215,7 +227,8 @@ wss.on('connection', (ws, request) => {
       // Only finalized words feed the pose pipeline (interim words can change).
       if (!data.is_final) return;
 
-      const words = transcript.trim().split(/\s+/).filter(Boolean);
+      const signableTranscript = expandDigitsForSigning(transcript);
+      const words = signableTranscript.trim().split(/\s+/).filter(Boolean);
       if (words.length) wordBuffer.push(...words);
 
       // Flush a full utterance at end-of-speech, or when the buffer gets long
