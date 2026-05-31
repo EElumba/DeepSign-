@@ -29,6 +29,8 @@ TARGET_FACE_HEIGHT = float(os.environ.get("TARGET_FACE_HEIGHT", "120"))
 TARGET_FACE_SHOULDER_X = float(os.environ.get("TARGET_FACE_SHOULDER_X", "0"))
 TARGET_FACE_SHOULDER_Y = float(os.environ.get("TARGET_FACE_SHOULDER_Y", "-94"))
 STABILIZE_FACE_SIZE = os.environ.get("STABILIZE_FACE_SIZE", "1").lower() not in ("0", "false", "no")
+TARGET_BODY_HEIGHT = float(os.environ.get("TARGET_BODY_HEIGHT", "210"))
+STABILIZE_BODY_SIZE = os.environ.get("STABILIZE_BODY_SIZE", "1").lower() not in ("0", "false", "no")
 AVATAR_Y_OFFSET = float(os.environ.get("AVATAR_Y_OFFSET", "-45"))
 
 
@@ -153,6 +155,8 @@ def _postprocess_pose(pose_bytes: bytes) -> bytes:
         from pose_format import Pose
 
         pose = Pose.read(pose_bytes)
+        if STABILIZE_BODY_SIZE:
+            _stabilize_body_size(pose)
         if STABILIZE_FACE_SIZE:
             _stabilize_face_size(pose)
         if AVATAR_Y_OFFSET:
@@ -194,12 +198,86 @@ def _image_space_slices(pose):
         offset += count
 
 
+def _body_adjustment_slices(pose):
+    offset = 0
+    for component in pose.header.components:
+        count = len(component.points)
+        name = component.name.upper()
+        if "WORLD" not in name and name != "FACE_LANDMARKS":
+            yield slice(offset, offset + count)
+        offset += count
+
+
 def _shift_avatar_y(pose, offset: float) -> None:
     """Shift image-space landmarks vertically inside the pose canvas."""
     for point_slice in _image_space_slices(pose):
         visible = pose.body.confidence[:, :, point_slice] > 0
         y = pose.body.data[:, :, point_slice, 1]
         y[visible] = y[visible] + offset
+
+
+def _stabilize_body_size(pose) -> None:
+    """Keep shoulder-to-hip body length stable without changing shoulder width."""
+    if TARGET_BODY_HEIGHT <= 0:
+        return
+
+    pose_slice = _component_slice(pose, "POSE_LANDMARKS")
+    pose_points = _component_points(pose, "POSE_LANDMARKS") or []
+    if pose_slice is None:
+        return
+    try:
+        left_shoulder_index = pose_points.index("LEFT_SHOULDER")
+        right_shoulder_index = pose_points.index("RIGHT_SHOULDER")
+        left_hip_index = pose_points.index("LEFT_HIP")
+        right_hip_index = pose_points.index("RIGHT_HIP")
+    except ValueError:
+        return
+
+    pose_data = pose.body.data[:, :, pose_slice, :]
+    pose_confidence = pose.body.confidence[:, :, pose_slice]
+    adjustment_slices = list(_body_adjustment_slices(pose))
+
+    for frame_index in range(pose_data.shape[0]):
+        for person_index in range(pose_data.shape[1]):
+            required = (
+                left_shoulder_index,
+                right_shoulder_index,
+                left_hip_index,
+                right_hip_index,
+            )
+            if any(pose_confidence[frame_index, person_index, index] <= 0 for index in required):
+                continue
+
+            left_shoulder = pose_data[frame_index, person_index, left_shoulder_index, :2]
+            right_shoulder = pose_data[frame_index, person_index, right_shoulder_index, :2]
+            left_hip = pose_data[frame_index, person_index, left_hip_index, :2]
+            right_hip = pose_data[frame_index, person_index, right_hip_index, :2]
+            if not (
+                np.isfinite(left_shoulder).all()
+                and np.isfinite(right_shoulder).all()
+                and np.isfinite(left_hip).all()
+                and np.isfinite(right_hip).all()
+            ):
+                continue
+
+            shoulder_y = float((left_shoulder[1] + right_shoulder[1]) / 2)
+            hip_y = float((left_hip[1] + right_hip[1]) / 2)
+            body_height = hip_y - shoulder_y
+            if body_height <= 1:
+                continue
+
+            scale_y = TARGET_BODY_HEIGHT / body_height
+            if not np.isfinite(scale_y):
+                continue
+            scale_y = float(np.clip(scale_y, 0.65, 1.35))
+
+            for point_slice in adjustment_slices:
+                visible = pose.body.confidence[frame_index, person_index, point_slice] > 0
+                if not visible.any():
+                    continue
+                points = pose.body.data[frame_index, person_index, point_slice]
+                points[visible, 1] = (points[visible, 1] - shoulder_y) * scale_y + shoulder_y
+                points[visible, 2] = points[visible, 2] * scale_y
 
 
 def _stabilize_face_size(pose) -> None:
