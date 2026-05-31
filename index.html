@@ -5,8 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>ASL Pose Viewer</title>
 
+  <!-- Speak→Sign: pose-viewer web component -->
   <script type="module" src="https://unpkg.com/pose-viewer/dist/pose-viewer/pose-viewer.esm.js"></script>
   <script nomodule src="https://unpkg.com/pose-viewer/dist/pose-viewer/pose-viewer.js"></script>
+
+  <!-- Sign→Speak: MediaPipe Holistic + drawing utils -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
 
   <style>
     * { box-sizing: border-box; }
@@ -14,47 +19,81 @@
       margin: 0; padding: 0;
       background: #000; color: #fff;
       font-family: monospace;
-      height: 100vh;
+      min-height: 100vh;
       display: flex; flex-direction: column; align-items: center;
     }
-    .wrap { width: 100%; max-width: 504px; padding: 12px; display: flex; flex-direction: column; gap: 10px; height: 100%; }
+    .wrap {
+      width: 100%; max-width: 504px; padding: 12px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+
     #bar { display: flex; align-items: center; font-size: 13px; }
     #dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; background: #888; }
-    #dot.live { background: #2ecc71; }
+    #dot.live  { background: #2ecc71; }
     #dot.error { background: #e74c3c; }
-    #transcript {
-      font-size: 13px; line-height: 1.3; min-height: 2.6em;
-      max-height: 2.6em; overflow: hidden;
+
+    #mode-bar { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .mode-btn {
+      padding: 9px 4px; font-size: 12px; font-weight: 700; font-family: monospace;
+      color: #888; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; cursor: pointer;
+    }
+    .mode-btn.active { color: #fff; background: #2471a3; border-color: #2471a3; }
+
+    .info-line {
+      font-size: 13px; line-height: 1.4; min-height: 2.5em; max-height: 2.5em;
+      overflow: hidden;
       background: rgba(255,255,255,0.06); border-radius: 6px; padding: 6px 8px;
     }
+
     pose-viewer {
-      display: block;
-      width: 100%;
+      display: block; width: 100%;
       height: calc(min(100vw, 504px) - 24px);
       min-height: calc(min(100vw, 504px) - 24px);
       max-height: calc(min(100vw, 504px) - 24px);
-      aspect-ratio: 1 / 1;
-      overflow: hidden;
+      aspect-ratio: 1 / 1; overflow: hidden;
       contain: layout size paint;
-      background: #111;
-      border-radius: 6px;
-      flex: 0 0 auto;
+      background: #111; border-radius: 6px; flex: 0 0 auto;
     }
-    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; flex: 0 0 auto; }
+
+    #signCanvas {
+      display: block; width: 100%;
+      aspect-ratio: 4 / 3;
+      background: #111; border-radius: 6px;
+    }
+
+    #english-output {
+      font-size: 15px; font-weight: 600; min-height: 1.8em;
+      background: rgba(46,204,113,0.08); border-radius: 6px;
+      padding: 6px 10px; border-left: 3px solid #2ecc71;
+    }
+
+    #sign-status { font-size: 11px; color: #777; }
+
+    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     button {
       padding: 12px; font-size: 14px; font-weight: 600; font-family: monospace;
       color: #fff; border: none; border-radius: 8px; cursor: pointer;
     }
-    #micBtn { background: #2ecc71; }
-    #micBtn.recording { background: #e74c3c; }
-    #resetBtn { background: #555; }
-    button:disabled { opacity: 0.5; cursor: default; }
+    #micBtn    { background: #2ecc71; }
+    #cameraBtn { background: #2ecc71; }
+    #micBtn.recording, #cameraBtn.recording { background: #e74c3c; }
+    #resetBtn, #signResetBtn { background: #555; }
+    button:disabled { opacity: 0.45; cursor: default; }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div id="bar"><span id="dot"></span><span id="status-text">Connecting</span></div>
-    <div id="transcript"></div>
+<div class="wrap">
+
+  <div id="bar"><span id="dot"></span><span id="status-text">Connecting</span></div>
+
+  <div id="mode-bar">
+    <button id="speakModeBtn" class="mode-btn active">Speak to Sign</button>
+    <button id="signModeBtn"  class="mode-btn">Sign to Speak</button>
+  </div>
+
+  <!-- SPEAK to SIGN panel -->
+  <div id="speak-panel" style="display:flex; flex-direction:column; gap:10px;">
+    <div id="transcript" class="info-line"></div>
     <pose-viewer id="signer" autoplay></pose-viewer>
     <div class="controls">
       <button id="micBtn">Start</button>
@@ -62,187 +101,464 @@
     </div>
   </div>
 
-  <script>
-    const dot = document.getElementById('dot');
-    const statusText = document.getElementById('status-text');
-    const transcriptEl = document.getElementById('transcript');
-    const signer = document.getElementById('signer');
-    const resetBtn = document.getElementById('resetBtn');
+  <!-- SIGN to SPEAK panel -->
+  <div id="sign-panel" style="display:none; flex-direction:column; gap:10px;">
+    <div id="sign-status">Start camera then sign a word.</div>
+    <canvas id="signCanvas" width="640" height="480"></canvas>
+    <div id="gloss-display" class="info-line" title="Recognized gloss words"></div>
+    <div id="english-output"></div>
+    <div class="controls">
+      <button id="cameraBtn">Start Camera</button>
+      <button id="signResetBtn" type="button">Reset</button>
+    </div>
+  </div>
 
-    function setStatus(state, text) {
-      dot.className = state === 'live' ? 'live' : state === 'error' ? 'error' : '';
-      statusText.textContent = text;
-    }
+</div>
 
-    // --- Pose playback queue ---
-    // Each incoming .pose clip (a ~4-word chunk) is queued and played one at a
-    // time. We advance on the component's `ended$` event so a clip always finishes
-    // before the next begins — the whole sentence is signed instead of being cut off.
-    const poseQueue = [];
-    let currentUrl = null;
-    let playing = false;
-    let watchdog = null;
-    let displayWS = null;
-    const WATCHDOG_MS = 30000; // safety net in case `ended$` never fires
+<!-- Hidden video element that feeds MediaPipe frames -->
+<video id="signVideo" playsinline
+       style="display:none; position:fixed; left:-9999px; top:0; width:1px; height:1px;"></video>
 
-    function enqueuePose(blob) {
-      poseQueue.push(URL.createObjectURL(blob));
-      if (!playing) playNext();
-    }
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+//  Shared
+// ═══════════════════════════════════════════════════════════════════════════
+const dot        = document.getElementById('dot');
+const statusText = document.getElementById('status-text');
 
-    function clearPoseQueue() {
-      while (poseQueue.length) URL.revokeObjectURL(poseQueue.shift());
-    }
+function setStatus(state, text) {
+  dot.className = state === 'live' ? 'live' : state === 'error' ? 'error' : '';
+  statusText.textContent = text;
+}
 
-    function playNext() {
-      if (watchdog) { clearTimeout(watchdog); watchdog = null; }
-      // Release the clip that just finished.
-      if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
+// ═══════════════════════════════════════════════════════════════════════════
+//  SPEAK → SIGN  (original mode, unchanged logic)
+// ═══════════════════════════════════════════════════════════════════════════
+const transcriptEl = document.getElementById('transcript');
+const signer       = document.getElementById('signer');
+const resetBtn     = document.getElementById('resetBtn');
+const micBtn       = document.getElementById('micBtn');
 
-      // Queue drained — stop signing and clear the avatar instead of freezing
-      // on the last frame.
-      if (poseQueue.length === 0) {
-        playing = false;
-        stopSigning();
-        return;
-      }
+const poseQueue = [];
+let currentUrl  = null;
+let playing     = false;
+let watchdog    = null;
+let displayWS   = null;
+const WATCHDOG_MS = 30000;
 
-      playing = true;
-      const url = poseQueue.shift();
-      currentUrl = url;
+function enqueuePose(blob) {
+  poseQueue.push(URL.createObjectURL(blob));
+  if (!playing) playNext();
+}
 
-      const apply = () => {
-        signer.src = url;
-        try { if (typeof signer.play === 'function') signer.play(); } catch (e) {}
-        // If the clip never reports `ended$`, advance anyway after a timeout.
-        watchdog = setTimeout(playNext, WATCHDOG_MS);
-      };
-      if (window.customElements && customElements.whenDefined) {
-        customElements.whenDefined('pose-viewer').then(apply).catch(apply);
-      } else {
-        apply();
-      }
-    }
+function clearPoseQueue() {
+  while (poseQueue.length) URL.revokeObjectURL(poseQueue.shift());
+}
 
-    // Halt playback and clear the rendered pose so the skeleton stops signing.
-    function stopSigning() {
-      try { if (typeof signer.pause === 'function') signer.pause(); } catch (e) {}
-      try { signer.src = ''; } catch (e) {}
-      try { signer.removeAttribute('src'); } catch (e) {}
-    }
+function playNext() {
+  if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+  if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
+  if (!poseQueue.length) { playing = false; stopSigning(); return; }
+  playing = true;
+  currentUrl = poseQueue.shift();
+  const url = currentUrl;
+  const apply = () => {
+    signer.src = url;
+    try { if (typeof signer.play === 'function') signer.play(); } catch (e) {}
+    watchdog = setTimeout(playNext, WATCHDOG_MS);
+  };
+  if (window.customElements && customElements.whenDefined) {
+    customElements.whenDefined('pose-viewer').then(apply).catch(apply);
+  } else { apply(); }
+}
 
-    function resetSigning(notifyServer = true) {
-      if (watchdog) { clearTimeout(watchdog); watchdog = null; }
-      clearPoseQueue();
-      if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
-      playing = false;
-      stopSigning();
-      transcriptEl.textContent = '';
-      if (notifyServer && displayWS && displayWS.readyState === WebSocket.OPEN) {
-        displayWS.send(JSON.stringify({ type: 'reset' }));
-      }
-    }
+function stopSigning() {
+  try { if (typeof signer.pause === 'function') signer.pause(); } catch (e) {}
+  try { signer.src = ''; } catch (e) {}
+  try { signer.removeAttribute('src'); } catch (e) {}
+}
 
-    // pose-viewer fires `ended$` when a clip finishes (it must NOT have `loop`).
-    signer.addEventListener('ended$', () => playNext());
+function resetSigning(notifyServer = true) {
+  if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+  clearPoseQueue();
+  if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
+  playing = false;
+  stopSigning();
+  transcriptEl.textContent = '';
+  if (notifyServer && displayWS && displayWS.readyState === WebSocket.OPEN) {
+    displayWS.send(JSON.stringify({ type: 'reset' }));
+  }
+}
 
-    // --- Display WebSocket (binary .pose + JSON transcript metadata) ---
-    displayWS = new WebSocket(`ws://${location.host}`);
-    displayWS.binaryType = 'arraybuffer';
-    displayWS.onopen = () => setStatus('live', 'Live');
-    displayWS.onclose = () => setStatus('error', 'Error');
-    displayWS.onerror = () => setStatus('error', 'Error');
-    displayWS.onmessage = (event) => {
-      if (event.data instanceof ArrayBuffer || event.data instanceof Blob) {
-        const blob = event.data instanceof Blob
-          ? event.data
-          : new Blob([event.data], { type: 'application/octet-stream' });
-        enqueuePose(blob);
-      } else {
-        let msg;
-        try { msg = JSON.parse(event.data); } catch (e) { return; }
-        if (msg.type === 'transcript') {
-          transcriptEl.textContent = msg.text;
-        } else if (msg.type === 'reset') {
-          resetSigning(false);
-        }
-      }
-    };
+signer.addEventListener('ended$', () => playNext());
 
-    // --- Mic capture → /audio WebSocket (Int16 PCM @ 16kHz mono) ---
-    const micBtn = document.getElementById('micBtn');
-    let recording = false;
-    let stream = null;
-    let micWs = null;
-    let audioContext = null;
-    let source = null;
-    let processor = null;
+displayWS = new WebSocket(`ws://${location.host}`);
+displayWS.binaryType = 'arraybuffer';
+displayWS.onopen  = () => setStatus('live', 'Live');
+displayWS.onclose = () => setStatus('error', 'Disconnected');
+displayWS.onerror = () => setStatus('error', 'Error');
+displayWS.onmessage = (event) => {
+  if (event.data instanceof ArrayBuffer || event.data instanceof Blob) {
+    const blob = event.data instanceof Blob
+      ? event.data
+      : new Blob([event.data], { type: 'application/octet-stream' });
+    enqueuePose(blob);
+  } else {
+    let msg; try { msg = JSON.parse(event.data); } catch (e) { return; }
+    if (msg.type === 'transcript') transcriptEl.textContent = msg.text;
+    else if (msg.type === 'reset') resetSigning(false);
+  }
+};
 
-    async function startMic() {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch (e) {
-        console.error('Mic permission denied:', e);
-        setStatus('error', 'Mic denied');
-        return;
-      }
+let recording    = false;
+let micStream    = null;
+let micWs        = null;
+let audioCtx     = null;
+let micSource    = null;
+let micProcessor = null;
 
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      micWs = new WebSocket(`${proto}://${location.host}/audio`);
-      micWs.binaryType = 'arraybuffer';
+async function startMic() {
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    console.error('Mic permission denied:', e);
+    setStatus('error', 'Mic denied');
+    return;
+  }
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  micWs = new WebSocket(`${proto}://${location.host}/audio`);
+  micWs.binaryType = 'arraybuffer';
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  audioCtx     = new AudioCtx({ sampleRate: 16000 });
+  micSource    = audioCtx.createMediaStreamSource(micStream);
+  micProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+  micProcessor.onaudioprocess = (e) => {
+    if (!micWs || micWs.readyState !== 1) return;
+    const float32 = e.inputBuffer.getChannelData(0);
+    const int16   = new Int16Array(float32.length);
+    for (let i = 0; i < float32.length; i++)
+      int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
+    micWs.send(int16.buffer);
+  };
+  micSource.connect(micProcessor);
+  micProcessor.connect(audioCtx.destination);
+  recording = true;
+  micBtn.textContent = 'Stop';
+  micBtn.classList.add('recording');
+}
 
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      audioContext = new AudioCtx({ sampleRate: 16000 });
-      source = audioContext.createMediaStreamSource(stream);
-      // ScriptProcessor is deprecated but reliably available in the glasses WebView.
-      processor = audioContext.createScriptProcessor(4096, 1, 1);
+function stopMic() {
+  try { if (micProcessor) micProcessor.disconnect(); } catch (e) {}
+  try { if (micSource)    micSource.disconnect();    } catch (e) {}
+  try { if (audioCtx)     audioCtx.close();          } catch (e) {}
+  try { if (micStream)    micStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  try { if (micWs && micWs.readyState === 1) micWs.close(); } catch (e) {}
+  micProcessor = micSource = audioCtx = micStream = micWs = null;
+  recording = false;
+  micBtn.textContent = 'Start';
+  micBtn.classList.remove('recording');
+}
 
-      processor.onaudioprocess = (e) => {
-        if (!micWs || micWs.readyState !== 1) return;
-        const float32 = e.inputBuffer.getChannelData(0);
-        const int16 = new Int16Array(float32.length);
-        for (let i = 0; i < float32.length; i++) {
-          int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
-        }
-        micWs.send(int16.buffer);
-      };
+micBtn.addEventListener('click', async () => {
+  micBtn.disabled = true;
+  try { if (recording) stopMic(); else await startMic(); }
+  finally { micBtn.disabled = false; }
+});
 
-      source.connect(processor);
-      processor.connect(audioContext.destination);
+resetBtn.addEventListener('click', () => resetSigning(true));
 
-      recording = true;
-      micBtn.textContent = 'Stop';
-      micBtn.classList.add('recording');
-    }
+// ═══════════════════════════════════════════════════════════════════════════
+//  SIGN → SPEAK  (new reverse mode)
+// ═══════════════════════════════════════════════════════════════════════════
+const signCanvas    = document.getElementById('signCanvas');
+const signCtx       = signCanvas.getContext('2d');
+const signVideo     = document.getElementById('signVideo');
+const glossDisplay  = document.getElementById('gloss-display');
+const englishOutput = document.getElementById('english-output');
+const signStatus    = document.getElementById('sign-status');
+const cameraBtn     = document.getElementById('cameraBtn');
+const signResetBtn  = document.getElementById('signResetBtn');
 
-    function stopMic() {
-      try { if (processor) processor.disconnect(); } catch (e) {}
-      try { if (source) source.disconnect(); } catch (e) {}
-      try { if (audioContext) audioContext.close(); } catch (e) {}
-      try { if (stream) stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
-      try { if (micWs && micWs.readyState === 1) micWs.close(); } catch (e) {}
-      processor = null;
-      source = null;
-      audioContext = null;
-      stream = null;
-      micWs = null;
+const MIN_SIGN_FRAMES    = 10;    // ignore gestures shorter than this many frames
+const MAX_SIGN_FRAMES    = 120;   // force-flush after ~4 s at 30 fps
+const REST_FRAMES        = 20;    // still frames before treating sign as complete
+const VELOCITY_THRESHOLD = 0.012; // normalized wrist movement to count as "active"
+const CONFIDENCE_MIN     = 0.45;  // recognition cosine similarity gate
+const GLOSS_IDLE_MS      = 2500;  // silence after last gloss → translate + speak
 
-      recording = false;
-      micBtn.textContent = 'Start';
-      micBtn.classList.remove('recording');
-    }
+let holistic        = null;
+let signStream      = null;
+let signRunning     = false;
+let signFrameBuffer = [];
+let signGlosses     = [];
+let signActive      = false;
+let signRestCount   = 0;
+let prevWrists      = null;
+let recognizing     = false;
+let glossTimer      = null;
 
-    micBtn.addEventListener('click', async () => {
-      micBtn.disabled = true;
-      try {
-        if (recording) stopMic();
-        else await startMic();
-      } finally {
-        micBtn.disabled = false;
-      }
+function setSignStatus(msg) { signStatus.textContent = msg; }
+
+// ── Camera lifecycle ──────────────────────────────────────────────────── //
+
+async function startCamera() {
+  if (!holistic) {
+    setSignStatus('Loading pose model…');
+    holistic = new Holistic({
+      locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${f}`,
     });
+    holistic.setOptions({
+      modelComplexity: 1,
+      smoothLandmarks: true,
+      refineFaceLandmarks: false,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+    holistic.onResults(onSignResults);
+    if (typeof holistic.initialize === 'function') await holistic.initialize();
+  }
 
-    resetBtn.addEventListener('click', () => resetSigning(true));
-  </script>
+  try {
+    signStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480, facingMode: 'user' },
+      audio: false,
+    });
+    signVideo.srcObject = signStream;
+    await signVideo.play();
+  } catch (e) {
+    console.error('Camera error:', e);
+    setSignStatus('Camera access denied.');
+    return;
+  }
+
+  signRunning = true;
+  cameraBtn.textContent = 'Stop Camera';
+  cameraBtn.classList.add('recording');
+  setSignStatus('Watching… sign a word!');
+
+  // One frame at a time — await holistic before scheduling the next frame
+  // so we never pile up concurrent send() calls if processing is slow.
+  (async function loop() {
+    while (signRunning) {
+      await holistic.send({ image: signVideo });
+      await new Promise(r => requestAnimationFrame(r));
+    }
+  })();
+}
+
+function stopCamera() {
+  signRunning = false;
+  if (signStream) { signStream.getTracks().forEach(t => t.stop()); signStream = null; }
+  signVideo.srcObject = null;
+  signCtx.clearRect(0, 0, signCanvas.width, signCanvas.height);
+  cameraBtn.textContent = 'Start Camera';
+  cameraBtn.classList.remove('recording');
+  setSignStatus('Start camera to begin signing.');
+}
+
+// ── MediaPipe result handler ──────────────────────────────────────────── //
+
+function onSignResults(results) {
+  const W = signCanvas.width, H = signCanvas.height;
+  signCtx.clearRect(0, 0, W, H);
+
+  // Draw video mirrored so it feels like a selfie camera
+  signCtx.save();
+  signCtx.translate(W, 0);
+  signCtx.scale(-1, 1);
+  signCtx.drawImage(results.image, 0, 0, W, H);
+  signCtx.restore();
+
+  // Mirror landmark x coordinates to match the flipped video
+  const mx = (lms) => lms ? lms.map(p => ({ ...p, x: 1 - p.x })) : null;
+
+  if (results.poseLandmarks) {
+    drawConnectors(signCtx, mx(results.poseLandmarks), POSE_CONNECTIONS,
+      { color: '#00CC44', lineWidth: 2 });
+  }
+  if (results.leftHandLandmarks) {
+    drawConnectors(signCtx, mx(results.leftHandLandmarks), HAND_CONNECTIONS,
+      { color: '#CC2222', lineWidth: 2 });
+    drawLandmarks(signCtx, mx(results.leftHandLandmarks),
+      { color: '#FF5555', lineWidth: 1, radius: 3 });
+  }
+  if (results.rightHandLandmarks) {
+    drawConnectors(signCtx, mx(results.rightHandLandmarks), HAND_CONNECTIONS,
+      { color: '#2244CC', lineWidth: 2 });
+    drawLandmarks(signCtx, mx(results.rightHandLandmarks),
+      { color: '#5577FF', lineWidth: 1, radius: 3 });
+  }
+
+  processSignFrame(results);
+}
+
+// ── Sign segmentation (velocity-based) ───────────────────────────────── //
+
+function processSignFrame(results) {
+  const lh   = results.leftHandLandmarks;
+  const rh   = results.rightHandLandmarks;
+  const pose = results.poseLandmarks;
+
+  const lw = pose ? pose[15] : null; // left wrist
+  const rw = pose ? pose[16] : null; // right wrist
+
+  let velocity = 0;
+  if (prevWrists) {
+    if (lw && prevWrists.lw) velocity += Math.hypot(lw.x - prevWrists.lw.x, lw.y - prevWrists.lw.y);
+    if (rw && prevWrists.rw) velocity += Math.hypot(rw.x - prevWrists.rw.x, rw.y - prevWrists.rw.y);
+    velocity /= 2;
+  }
+  prevWrists = { lw: lw || null, rw: rw || null };
+
+  const handsVisible = !!(lh || rh);
+  const isActive     = handsVisible && velocity > VELOCITY_THRESHOLD;
+
+  if (isActive) {
+    if (!signActive) setSignStatus('Signing…');
+    signActive    = true;
+    signRestCount = 0;
+    signFrameBuffer.push({
+      left_hand:  lh ? lh.map(p => [p.x, p.y, p.z]) : null,
+      right_hand: rh ? rh.map(p => [p.x, p.y, p.z]) : null,
+    });
+    if (signFrameBuffer.length >= MAX_SIGN_FRAMES) flushSignBuffer();
+  } else if (signActive) {
+    signRestCount++;
+    if (signRestCount >= REST_FRAMES) flushSignBuffer();
+  }
+}
+
+// ── Recognition → gloss accumulation ─────────────────────────────────── //
+
+async function flushSignBuffer() {
+  const frames  = signFrameBuffer.splice(0);
+  signActive    = false;
+  signRestCount = 0;
+
+  if (frames.length < MIN_SIGN_FRAMES || recognizing) {
+    setSignStatus('Watching… sign a word!');
+    return;
+  }
+
+  recognizing = true;
+  setSignStatus('Recognizing…');
+  try {
+    const r = await fetch('/api/recognize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ frames }),
+    });
+    if (!r.ok) throw new Error(r.statusText);
+    const { gloss, confidence } = await r.json();
+    if (gloss && confidence >= CONFIDENCE_MIN) {
+      signGlosses.push(gloss.toUpperCase());
+      glossDisplay.textContent = signGlosses.join('  ');
+      scheduleGlossFlush();
+    }
+  } catch (e) {
+    console.error('[Recognize]', e);
+  } finally {
+    recognizing = false;
+    setSignStatus('Watching… sign a word!');
+  }
+}
+
+function scheduleGlossFlush() {
+  if (glossTimer) clearTimeout(glossTimer);
+  glossTimer = setTimeout(flushGlossesToEnglish, GLOSS_IDLE_MS);
+}
+
+// ── Gloss → English → ElevenLabs TTS ─────────────────────────────────── //
+
+async function flushGlossesToEnglish() {
+  if (!signGlosses.length) return;
+  const gloss = signGlosses.splice(0).join(' ');
+  glossDisplay.textContent = '';
+  setSignStatus('Translating…');
+  try {
+    const geRes = await fetch('/api/gloss-to-english', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ gloss }),
+    });
+    const { text } = await geRes.json();
+    englishOutput.textContent = text;
+    setSignStatus('Speaking…');
+    await speakText(text);
+  } catch (e) {
+    console.error('[Gloss→EN]', e);
+  } finally {
+    setSignStatus('Watching… sign a word!');
+  }
+}
+
+async function speakText(text) {
+  try {
+    const r = await fetch('/api/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!r.ok) { console.warn('[TTS] server error', r.status); return; }
+    const blob = await r.blob();
+    const url  = URL.createObjectURL(blob);
+    await new Promise((resolve) => {
+      const audio   = new Audio(url);
+      audio.onended = () => { URL.revokeObjectURL(url); resolve(); };
+      audio.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+      audio.play().catch(resolve);
+    });
+  } catch (e) {
+    console.error('[TTS]', e);
+  }
+}
+
+// ── Sign mode controls ────────────────────────────────────────────────── //
+
+cameraBtn.addEventListener('click', async () => {
+  cameraBtn.disabled = true;
+  try { signRunning ? stopCamera() : await startCamera(); }
+  finally { cameraBtn.disabled = false; }
+});
+
+signResetBtn.addEventListener('click', () => {
+  if (glossTimer) { clearTimeout(glossTimer); glossTimer = null; }
+  signGlosses     = [];
+  signFrameBuffer = [];
+  signActive      = false;
+  signRestCount   = 0;
+  prevWrists      = null;
+  glossDisplay.textContent  = '';
+  englishOutput.textContent = '';
+  setSignStatus(signRunning ? 'Watching… sign a word!' : 'Start camera to begin signing.');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Mode switching
+// ═══════════════════════════════════════════════════════════════════════════
+const speakModeBtn = document.getElementById('speakModeBtn');
+const signModeBtn  = document.getElementById('signModeBtn');
+const speakPanel   = document.getElementById('speak-panel');
+const signPanel    = document.getElementById('sign-panel');
+
+function enterSpeakMode() {
+  stopCamera();
+  signPanel.style.display  = 'none';
+  speakPanel.style.display = 'flex';
+  speakModeBtn.classList.add('active');
+  signModeBtn.classList.remove('active');
+}
+
+function enterSignMode() {
+  stopMic();
+  speakPanel.style.display = 'none';
+  signPanel.style.display  = 'flex';
+  signModeBtn.classList.add('active');
+  speakModeBtn.classList.remove('active');
+}
+
+speakModeBtn.addEventListener('click', enterSpeakMode);
+signModeBtn.addEventListener('click', enterSignMode);
+</script>
 </body>
 </html>

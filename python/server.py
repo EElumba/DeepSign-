@@ -40,6 +40,10 @@ POSE_GENERATION_TIMEOUT = float(os.environ.get("POSE_GENERATION_TIMEOUT", "30"))
 _pose_cache: OrderedDict[str, bytes] = OrderedDict()
 _pose_cache_lock = Lock()
 
+# --- Sign recognition lexicon (loaded at startup) ---
+_lexicon_features: dict = {}   # gloss -> np.ndarray (126,) mean feature vector
+_lexicon_features_lock = Lock()
+
 
 def _fingerspelling_lexicon_dir() -> str:
     import spoken_to_signed
@@ -126,6 +130,10 @@ class PoseRequest(BaseModel):
     text: str
 
 
+class RecognizeRequest(BaseModel):
+    frames: list  # [{left_hand: [[x,y,z]…]|null, right_hand: …}]
+
+
 def _cache_get(text: str) -> Optional[bytes]:
     if POSE_CACHE_SIZE <= 0:
         return None
@@ -144,6 +152,99 @@ def _cache_set(text: str, pose_bytes: bytes) -> None:
         _pose_cache.move_to_end(text)
         while len(_pose_cache) > POSE_CACHE_SIZE:
             _pose_cache.popitem(last=False)
+
+
+# ---------------------------------------------------------------------------
+# Sign recognition helpers
+# ---------------------------------------------------------------------------
+
+def _normalize_hand(lm: Optional[np.ndarray]) -> np.ndarray:
+    """Center a hand at its wrist and normalize by max finger distance.
+
+    Both the browser MediaPipe [0-1] space and the lexicon pixel space are
+    reduced to a unit-scale, wrist-origin shape descriptor, making them
+    comparable regardless of absolute coordinate system.
+    """
+    zeros = np.zeros((21, 3), dtype=np.float32)
+    if lm is None or lm.shape != (21, 3):
+        return zeros
+    lm = lm.astype(np.float32)
+    lm -= lm[0]  # center at wrist (index 0)
+    scale = np.linalg.norm(lm, axis=1).max()
+    if scale > 1e-6:
+        lm /= scale
+    return lm
+
+
+def _frame_feature(lh: Optional[np.ndarray], rh: Optional[np.ndarray]) -> np.ndarray:
+    """126-dim feature vector: normalized left hand (63) + right hand (63)."""
+    return np.concatenate([_normalize_hand(lh).flatten(), _normalize_hand(rh).flatten()])
+
+
+def _pose_to_mean_feature(pose) -> Optional[np.ndarray]:
+    """Extract a single mean (126,) feature vector from a pose_format Pose."""
+    lh_sl = _component_slice(pose, "LEFT_HAND_LANDMARKS")
+    rh_sl = _component_slice(pose, "RIGHT_HAND_LANDMARKS")
+    if lh_sl is None and rh_sl is None:
+        return None
+
+    feats = []
+    for f in range(pose.body.data.shape[0]):
+        lh_data = rh_data = None
+        if lh_sl is not None and pose.body.confidence[f, 0, lh_sl].mean() > 0.1:
+            lh_data = pose.body.data[f, 0, lh_sl, :3]
+        if rh_sl is not None and pose.body.confidence[f, 0, rh_sl].mean() > 0.1:
+            rh_data = pose.body.data[f, 0, rh_sl, :3]
+        feats.append(_frame_feature(lh_data, rh_data))
+
+    if not feats:
+        return None
+    mean = np.stack(feats).mean(axis=0)
+    norm = np.linalg.norm(mean)
+    return (mean / norm).astype(np.float32) if norm > 1e-6 else None
+
+
+def _load_lexicon_features() -> None:
+    """Read every .pose file in the lexicon and cache its mean feature vector."""
+    try:
+        from pose_format import Pose as _Pose
+    except ImportError:
+        print("[Recognize] pose_format not installed; recognition disabled.")
+        return
+
+    index_path = os.path.join(LEXICON_DIR, "index.csv")
+    if not os.path.isfile(index_path):
+        print(f"[Recognize] No index.csv found at {LEXICON_DIR}; recognition disabled.")
+        return
+
+    new_features: dict = {}
+    loaded = failed = 0
+
+    with open(index_path, encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+
+    for row in rows:
+        gloss = (row.get("glosses") or row.get("words") or "").strip().lower()
+        abs_path = os.path.join(LEXICON_DIR, row.get("path", ""))
+        if not gloss or not os.path.isfile(abs_path):
+            continue
+        try:
+            with open(abs_path, "rb") as pf:
+                pose = _Pose.read(pf.read())
+            feat = _pose_to_mean_feature(pose)
+            if feat is not None:
+                new_features[gloss] = feat
+                loaded += 1
+            else:
+                failed += 1
+        except Exception as e:
+            print(f"[Recognize] Skipping {abs_path}: {e}")
+            failed += 1
+
+    with _lexicon_features_lock:
+        _lexicon_features.update(new_features)
+
+    print(f"[Recognize] {loaded} sign feature(s) loaded, {failed} skipped.")
 
 
 def generate_pose(text: str) -> bytes:
@@ -415,17 +516,56 @@ async def startup():
     print(f"[Startup] ASL Pose Server listening on port {PORT}")
     print(f"[Startup] text_to_gloss_to_pose CLI: {CLI}")
     print(f"[Startup] Lexicon dir: {LEXICON_DIR}")
-    # Warm up the pipeline (loads lexicon/pose assets) so the first real request is fast.
     try:
         generate_pose("hello")
         print("[Warmup] Pose model ready")
     except Exception as e:
         print(f"[Warmup] Warning: {e}")
+    # Load lexicon features for sign recognition (runs in the startup thread).
+    _load_lexicon_features()
 
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/recognize")
+def recognize_sign(req: RecognizeRequest):
+    with _lexicon_features_lock:
+        n_signs = len(_lexicon_features)
+    if n_signs == 0:
+        raise HTTPException(status_code=503, detail="Recognition lexicon not loaded")
+    if not req.frames:
+        raise HTTPException(status_code=400, detail="No frames provided")
+
+    feats = []
+    for frame in req.frames:
+        if not isinstance(frame, dict):
+            continue
+        lh = frame.get("left_hand")
+        rh = frame.get("right_hand")
+        lh_arr = np.array(lh, dtype=np.float32) if (lh and len(lh) == 21) else None
+        rh_arr = np.array(rh, dtype=np.float32) if (rh and len(rh) == 21) else None
+        feats.append(_frame_feature(lh_arr, rh_arr))
+
+    if not feats:
+        return {"gloss": "", "confidence": 0.0}
+
+    query_mean = np.stack(feats).mean(axis=0)
+    norm = np.linalg.norm(query_mean)
+    if norm < 1e-6:
+        return {"gloss": "", "confidence": 0.0}
+    query_mean = (query_mean / norm).astype(np.float32)
+
+    best_gloss, best_score = "", -1.0
+    with _lexicon_features_lock:
+        for gloss, ref in _lexicon_features.items():
+            score = float(np.dot(query_mean, ref))
+            if score > best_score:
+                best_score, best_gloss = score, gloss
+
+    return {"gloss": best_gloss, "confidence": round(best_score, 4)}
 
 
 @app.post("/pose")

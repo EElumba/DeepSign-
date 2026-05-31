@@ -41,6 +41,21 @@ if (!openai) {
   console.log(`[Gloss] ASL glossing enabled with model "${OPENAI_MODEL}".`);
 }
 
+// --- ElevenLabs TTS (Sign→Speak mode) ------------------------------------- //
+const ELEVENLABS_API_KEY  = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM';
+
+if (!ELEVENLABS_API_KEY) {
+  console.warn('[TTS] ELEVENLABS_API_KEY not set — /api/tts will return 503.');
+} else {
+  console.log('[TTS] ElevenLabs TTS enabled.');
+}
+
+const GLOSS_TO_ENGLISH_PROMPT =
+  'You are an ASL interpreter. Convert ASL gloss notation into natural spoken English. ' +
+  'ASL gloss uses base word forms, no articles, and topic-comment word order. ' +
+  'Output only the English sentence — no commentary, no extra punctuation.';
+
 const GLOSS_SYSTEM_PROMPT =
   'You are an expert American Sign Language (ASL) interpreter. Convert the ' +
   "English text into ASL gloss. Rules: use ASL grammar and word order " +
@@ -99,8 +114,86 @@ async function englishToAslGloss(text) {
 }
 
 const app = express();
+app.use(express.json({ limit: '5mb' }));
+
 app.get('/', (req, res) => {
   res.sendFile(join(__dirname, 'index.html'));
+});
+
+// ── Sign→Speak REST endpoints ──────────────────────────────────────────── //
+
+// Proxy landmark frames to the Python recognizer
+app.post('/api/recognize', async (req, res) => {
+  try {
+    const r = await fetch(`${POSE_SERVER_URL}/recognize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body),
+    });
+    if (!r.ok) return res.status(r.status).json({ error: 'Recognition failed' });
+    res.json(await r.json());
+  } catch (err) {
+    console.error('[Recognize]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Convert ASL gloss to natural English via OpenAI
+app.post('/api/gloss-to-english', async (req, res) => {
+  const { gloss } = req.body || {};
+  if (!gloss) return res.status(400).json({ error: 'gloss required' });
+  if (!openai) return res.json({ text: gloss }); // graceful fallback
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_MODEL,
+      temperature: 0.3,
+      max_tokens: 80,
+      messages: [
+        { role: 'system', content: GLOSS_TO_ENGLISH_PROMPT },
+        { role: 'user', content: gloss },
+      ],
+    });
+    res.json({ text: completion.choices[0].message.content.trim() });
+  } catch (err) {
+    console.error('[Gloss→EN]', err.message);
+    res.json({ text: gloss }); // return raw gloss on failure
+  }
+});
+
+// ElevenLabs TTS proxy — keeps the API key server-side
+app.post('/api/tts', async (req, res) => {
+  const { text } = req.body || {};
+  if (!text) return res.status(400).json({ error: 'text required' });
+  if (!ELEVENLABS_API_KEY) return res.status(503).json({ error: 'ELEVENLABS_API_KEY not configured' });
+
+  try {
+    const r = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+      {
+        method: 'POST',
+        headers: {
+          'xi-api-key': ELEVENLABS_API_KEY,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text,
+          model_id: 'eleven_multilingual_v2',
+          voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+        }),
+      }
+    );
+    if (!r.ok) {
+      const errText = await r.text();
+      console.error('[TTS] ElevenLabs error:', errText);
+      return res.status(500).json({ error: 'TTS request failed' });
+    }
+    res.set('Content-Type', 'audio/mpeg');
+    r.body.pipe(res);
+  } catch (err) {
+    console.error('[TTS]', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 const server = createServer(app);
