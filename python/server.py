@@ -5,6 +5,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections import OrderedDict
+from threading import Lock
 from typing import Optional
 
 import numpy as np
@@ -32,6 +34,11 @@ STABILIZE_FACE_SIZE = os.environ.get("STABILIZE_FACE_SIZE", "1").lower() not in 
 TARGET_BODY_HEIGHT = float(os.environ.get("TARGET_BODY_HEIGHT", "210"))
 STABILIZE_BODY_SIZE = os.environ.get("STABILIZE_BODY_SIZE", "1").lower() not in ("0", "false", "no")
 AVATAR_Y_OFFSET = float(os.environ.get("AVATAR_Y_OFFSET", "-45"))
+POSE_CACHE_SIZE = max(0, int(os.environ.get("POSE_CACHE_SIZE", "128")))
+POSE_GENERATION_TIMEOUT = float(os.environ.get("POSE_GENERATION_TIMEOUT", "30"))
+
+_pose_cache: OrderedDict[str, bytes] = OrderedDict()
+_pose_cache_lock = Lock()
 
 
 def _fingerspelling_lexicon_dir() -> str:
@@ -119,12 +126,37 @@ class PoseRequest(BaseModel):
     text: str
 
 
+def _cache_get(text: str) -> Optional[bytes]:
+    if POSE_CACHE_SIZE <= 0:
+        return None
+    with _pose_cache_lock:
+        cached = _pose_cache.get(text)
+        if cached is not None:
+            _pose_cache.move_to_end(text)
+        return cached
+
+
+def _cache_set(text: str, pose_bytes: bytes) -> None:
+    if POSE_CACHE_SIZE <= 0:
+        return
+    with _pose_cache_lock:
+        _pose_cache[text] = pose_bytes
+        _pose_cache.move_to_end(text)
+        while len(_pose_cache) > POSE_CACHE_SIZE:
+            _pose_cache.popitem(last=False)
+
+
 def generate_pose(text: str) -> bytes:
     """Run the `text_to_gloss_to_pose` CLI and return the raw .pose bytes.
 
     Uses a unique temp file per call so concurrent requests don't collide.
     """
-    out_path = tempfile.mktemp(suffix=".pose")
+    cached = _cache_get(text)
+    if cached is not None:
+        return cached
+
+    fd, out_path = tempfile.mkstemp(suffix=".pose")
+    os.close(fd)
     try:
         result = subprocess.run(
             [
@@ -138,12 +170,14 @@ def generate_pose(text: str) -> bytes:
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=POSE_GENERATION_TIMEOUT,
         )
         if result.returncode != 0:
             raise RuntimeError(f"text_to_gloss_to_pose failed: {result.stderr}")
         with open(out_path, "rb") as f:
-            return _postprocess_pose(f.read())
+            pose_bytes = _postprocess_pose(f.read())
+        _cache_set(text, pose_bytes)
+        return pose_bytes
     finally:
         if os.path.exists(out_path):
             os.unlink(out_path)
@@ -236,48 +270,56 @@ def _stabilize_body_size(pose) -> None:
     pose_data = pose.body.data[:, :, pose_slice, :]
     pose_confidence = pose.body.confidence[:, :, pose_slice]
     adjustment_slices = list(_body_adjustment_slices(pose))
+    required = (
+        left_shoulder_index,
+        right_shoulder_index,
+        left_hip_index,
+        right_hip_index,
+    )
+    valid = (pose_confidence[:, :, required] > 0).all(axis=2)
+    if not valid.any():
+        return
 
-    for frame_index in range(pose_data.shape[0]):
-        for person_index in range(pose_data.shape[1]):
-            required = (
-                left_shoulder_index,
-                right_shoulder_index,
-                left_hip_index,
-                right_hip_index,
-            )
-            if any(pose_confidence[frame_index, person_index, index] <= 0 for index in required):
-                continue
+    left_shoulder = pose_data[:, :, left_shoulder_index, :2]
+    right_shoulder = pose_data[:, :, right_shoulder_index, :2]
+    left_hip = pose_data[:, :, left_hip_index, :2]
+    right_hip = pose_data[:, :, right_hip_index, :2]
+    valid &= (
+        np.isfinite(left_shoulder).all(axis=2)
+        & np.isfinite(right_shoulder).all(axis=2)
+        & np.isfinite(left_hip).all(axis=2)
+        & np.isfinite(right_hip).all(axis=2)
+    )
 
-            left_shoulder = pose_data[frame_index, person_index, left_shoulder_index, :2]
-            right_shoulder = pose_data[frame_index, person_index, right_shoulder_index, :2]
-            left_hip = pose_data[frame_index, person_index, left_hip_index, :2]
-            right_hip = pose_data[frame_index, person_index, right_hip_index, :2]
-            if not (
-                np.isfinite(left_shoulder).all()
-                and np.isfinite(right_shoulder).all()
-                and np.isfinite(left_hip).all()
-                and np.isfinite(right_hip).all()
-            ):
-                continue
+    shoulder_y = (left_shoulder[:, :, 1] + right_shoulder[:, :, 1]) / 2
+    hip_y = (left_hip[:, :, 1] + right_hip[:, :, 1]) / 2
+    body_height = hip_y - shoulder_y
+    valid &= body_height > 1
+    if not valid.any():
+        return
 
-            shoulder_y = float((left_shoulder[1] + right_shoulder[1]) / 2)
-            hip_y = float((left_hip[1] + right_hip[1]) / 2)
-            body_height = hip_y - shoulder_y
-            if body_height <= 1:
-                continue
+    scale_y = np.ones_like(body_height, dtype=np.float32)
+    scale_y[valid] = np.clip(TARGET_BODY_HEIGHT / body_height[valid], 0.65, 1.35)
+    shoulder_y = shoulder_y[:, :, None]
+    scale_y = scale_y[:, :, None]
+    valid = valid[:, :, None]
 
-            scale_y = TARGET_BODY_HEIGHT / body_height
-            if not np.isfinite(scale_y):
-                continue
-            scale_y = float(np.clip(scale_y, 0.65, 1.35))
-
-            for point_slice in adjustment_slices:
-                visible = pose.body.confidence[frame_index, person_index, point_slice] > 0
-                if not visible.any():
-                    continue
-                points = pose.body.data[frame_index, person_index, point_slice]
-                points[visible, 1] = (points[visible, 1] - shoulder_y) * scale_y + shoulder_y
-                points[visible, 2] = points[visible, 2] * scale_y
+    for point_slice in adjustment_slices:
+        visible = pose.body.confidence[:, :, point_slice] > 0
+        mask = visible & valid
+        if not mask.any():
+            continue
+        points = pose.body.data[:, :, point_slice]
+        points[:, :, :, 1] = np.where(
+            mask,
+            (points[:, :, :, 1] - shoulder_y) * scale_y + shoulder_y,
+            points[:, :, :, 1],
+        )
+        points[:, :, :, 2] = np.where(
+            mask,
+            points[:, :, :, 2] * scale_y,
+            points[:, :, :, 2],
+        )
 
 
 def _stabilize_face_size(pose) -> None:
@@ -387,7 +429,7 @@ async def health():
 
 
 @app.post("/pose")
-async def pose(req: PoseRequest):
+def pose(req: PoseRequest):
     text = (req.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text must be non-empty")

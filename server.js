@@ -18,6 +18,7 @@ if (!DEEPGRAM_API_KEY) {
 
 const POSE_SERVER_URL = process.env.POSE_SERVER_URL || 'http://localhost:8000';
 const FINAL_FLUSH_DELAY_MS = Number(process.env.FINAL_FLUSH_DELAY_MS || 120);
+const POSE_TIMEOUT_MS = Number(process.env.POSE_TIMEOUT_MS || 30000);
 
 const deepgram = createClient(DEEPGRAM_API_KEY);
 
@@ -28,6 +29,7 @@ const deepgram = createClient(DEEPGRAM_API_KEY);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const GLOSS_TIMEOUT_MS = Number(process.env.GLOSS_TIMEOUT_MS || 1500);
+const GLOSS_CACHE_SIZE = Math.max(0, Number(process.env.GLOSS_CACHE_SIZE || 128));
 
 const openai = OPENAI_API_KEY
   ? new OpenAI({ apiKey: OPENAI_API_KEY, timeout: GLOSS_TIMEOUT_MS, maxRetries: 0 })
@@ -65,7 +67,12 @@ function expandDigitsForSigning(text) {
 async function englishToAslGloss(text) {
   if (!openai) return text;
   const key = text.toLowerCase().trim();
-  if (glossCache.has(key)) return glossCache.get(key);
+  if (glossCache.has(key)) {
+    const cached = glossCache.get(key);
+    glossCache.delete(key);
+    glossCache.set(key, cached);
+    return cached;
+  }
   try {
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
@@ -78,7 +85,12 @@ async function englishToAslGloss(text) {
     });
     const gloss = completion.choices?.[0]?.message?.content?.trim();
     const result = gloss && gloss.length ? gloss : text;
-    glossCache.set(key, result);
+    if (GLOSS_CACHE_SIZE > 0) {
+      glossCache.set(key, result);
+      while (glossCache.size > GLOSS_CACHE_SIZE) {
+        glossCache.delete(glossCache.keys().next().value);
+      }
+    }
     return result;
   } catch (err) {
     console.error('[Gloss] OpenAI failed, using raw text:', err.message);
@@ -103,11 +115,14 @@ let poseGeneration = 0;
 // Ask the Python server to turn text into a .pose binary. Returns an
 // ArrayBuffer, or null on failure (caller should skip the broadcast).
 async function generatePose(text) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), POSE_TIMEOUT_MS);
   try {
     const res = await fetch(`${POSE_SERVER_URL}/pose`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
+      signal: controller.signal,
     });
     if (!res.ok) {
       console.error(`[Pose] Python server error: ${res.status}`);
@@ -115,8 +130,13 @@ async function generatePose(text) {
     }
     return await res.arrayBuffer();
   } catch (err) {
-    console.error('[Pose] Failed to reach Python server:', err.message);
+    const message = err.name === 'AbortError'
+      ? `Timed out after ${POSE_TIMEOUT_MS}ms`
+      : err.message;
+    console.error('[Pose] Failed to reach Python server:', message);
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
