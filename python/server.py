@@ -37,6 +37,14 @@ AVATAR_Y_OFFSET = float(os.environ.get("AVATAR_Y_OFFSET", "-45"))
 POSE_CACHE_SIZE = max(0, int(os.environ.get("POSE_CACHE_SIZE", "128")))
 POSE_GENERATION_TIMEOUT = float(os.environ.get("POSE_GENERATION_TIMEOUT", "30"))
 
+# MediaPipe Holistic stores ~468 face-mesh landmarks — roughly 85% of every
+# .pose payload — versus 33 body + 21+21 hand points. Dropping the dense face
+# mesh shrinks each clip ~6-7x, which dramatically cuts both the WebSocket
+# transfer and the pose-viewer render cost on low-power clients like the
+# Meta Ray-Ban Display glasses. The body landmarks still include nose/eyes/ears,
+# so the avatar keeps a rough head. Set STRIP_FACE=0 to keep the full face mesh.
+STRIP_FACE = os.environ.get("STRIP_FACE", "1").lower() not in ("0", "false", "no")
+
 _pose_cache: OrderedDict[str, bytes] = OrderedDict()
 _pose_cache_lock = Lock()
 
@@ -206,10 +214,25 @@ def _postprocess_pose(pose_bytes: bytes) -> bytes:
         pose = Pose.read(pose_bytes)
         if STABILIZE_BODY_SIZE:
             _stabilize_body_size(pose)
-        if STABILIZE_FACE_SIZE:
+        # Skip face stabilization when we're about to discard the face mesh.
+        if STABILIZE_FACE_SIZE and not STRIP_FACE:
             _stabilize_face_size(pose)
         if AVATAR_Y_OFFSET:
             _shift_avatar_y(pose, AVATAR_Y_OFFSET)
+
+        # Drop the heavy face mesh last (after any landmark adjustments that rely
+        # on its slices). Keep body + hands so the avatar stays light to send and
+        # render on low-power clients.
+        if STRIP_FACE:
+            keep = [c.name for c in pose.header.components
+                    if c.name.upper() != "FACE_LANDMARKS"]
+            if 0 < len(keep) < len(pose.header.components):
+                try:
+                    pose = pose.get_components(keep)
+                except Exception as e:
+                    print(f"[Pose] Face strip skipped: {e}")
+
+        # Apply playback speed last so it survives any component changes above.
         if SIGN_SPEED != 1.0:
             pose.body.fps = pose.body.fps * SIGN_SPEED
 
