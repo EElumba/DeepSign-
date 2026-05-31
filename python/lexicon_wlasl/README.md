@@ -1,8 +1,10 @@
 # WLASL pose lexicon
 
 This directory contains generated `.pose` files for the app's word-level ASL
-demo lexicon. The files were built from WLASL video metadata with
-`python/build_lexicon.py`; raw WLASL videos are not included.
+demo lexicon. The first set was built from WLASL video metadata with
+`python/build_lexicon.py`; later expansion used preprocessed WLASL MediaPipe
+landmarks via `python/import_processed_wlasl.py`. Raw WLASL videos are not
+included.
 
 Source dataset: https://github.com/dxli94/WLASL
 
@@ -13,7 +15,8 @@ redistributing this repository or using the generated pose files.
 
 Current generated set:
 
-- 206 indexed ASL glosses
-- 206 `.pose` files in `ase/`
-- Generated from the most-recorded WLASL glosses, extending past the top 200 to
-  replace source videos that were unavailable or below the hand-confidence gate
+- 2,000 indexed ASL glosses
+- 2,000 `.pose` files in `ase/`
+- Generated from the most-recorded and highest-priority available WLASL glosses,
+  with a focus on common communication, family, food, school/work, health, time,
+  questions, and conversation-repair vocabulary
