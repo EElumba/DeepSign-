@@ -16,7 +16,9 @@ if (!DEEPGRAM_API_KEY) {
   process.exit(1);
 }
 
-const POSE_SERVER_URL = process.env.POSE_SERVER_URL || 'http://localhost:8000';
+// Strip trailing slashes so `${POSE_SERVER_URL}/pose` never becomes `//pose`
+// (a double slash 404s on FastAPI/Starlette).
+const POSE_SERVER_URL = (process.env.POSE_SERVER_URL || 'http://localhost:8000').replace(/\/+$/, '');
 const FINAL_FLUSH_DELAY_MS = Number(process.env.FINAL_FLUSH_DELAY_MS || 120);
 const POSE_TIMEOUT_MS = Number(process.env.POSE_TIMEOUT_MS || 30000);
 
@@ -116,11 +118,32 @@ async function englishToAslGloss(text) {
 const app = express();
 app.use(express.json({ limit: '5mb' }));
 
-app.get('/', (req, res) => {
+// Speaker/controller page (phone or laptop): captures the mic and streams audio.
+// Meta Ray-Ban Display Web Apps cannot access the microphone, so voice capture
+// must happen here, not on the glasses.
+app.get(['/', '/speak'], (req, res) => {
   res.sendFile(join(__dirname, 'index.html'));
 });
 
-// ── Sign→Speak REST endpoints ──────────────────────────────────────────── //
+// Glasses display page: the Meta Ray-Ban Display Web App URL. Display-only
+// (no mic), 600x600, optimized for the see-through waveguide. Add THIS URL in
+// the Meta AI app (Developer Mode) -> Display Glasses -> App connections.
+app.get('/glasses', (req, res) => {
+  res.sendFile(join(__dirname, 'glasses.html'));
+});
+
+// Web App manifest + favicon (the glasses runtime requires a PNG icon; SVG is
+// not supported).
+app.get('/manifest.webmanifest', (req, res) => {
+  res.type('application/manifest+json').sendFile(join(__dirname, 'manifest.webmanifest'));
+});
+app.get('/icon.png', (req, res) => {
+  res.sendFile(join(__dirname, 'public', 'icon.png'), (err) => {
+    if (err) res.status(404).end();
+  });
+});
+
+// Sign->Speak REST endpoints.
 
 // Proxy landmark frames to the Python recognizer
 app.post('/api/recognize', async (req, res) => {
@@ -413,5 +436,6 @@ server.listen(PORT, () => {
   console.log(`ASL Pose MVP server listening on http://localhost:${PORT}`);
   console.log(`Make sure the Python pose server is running first:`);
   console.log(`  cd python && uvicorn server:app --port 8000`);
-  console.log(`On the Meta glasses browser, open http://YOUR_LOCAL_IP:${PORT} and grant mic permission.`);
+  console.log(`Speaker page (mic, phone/laptop): /  or  /speak  — grant mic permission.`);
+  console.log(`Glasses page (Meta Ray-Ban Display Web App URL): /glasses  — display only.`);
 });

@@ -228,6 +228,9 @@ yarn-error.log*
 # Pose artifacts
 *.pose
 
+# Large unreferenced binary asset (keep out of the repo)
+public/avatar.vrm
+
 # Commit the generated WLASL demo lexicon so the app works out of the box.
 !python/lexicon_wlasl/
 !python/lexicon_wlasl/**

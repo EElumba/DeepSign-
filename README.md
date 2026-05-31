@@ -69,13 +69,46 @@ Wait for: `Application startup complete.` (the first request is pre-warmed on st
 npm start
 ```
 
-## Open on Meta glasses
+## Open on Meta Ray-Ban Display glasses (Web App)
 
-```
-http://YOUR_LOCAL_IP:3000
-```
+Meta Ray-Ban **Display** glasses run standalone Web Apps loaded by URL through
+the Meta AI app. There are two ways to use the app:
 
-Grant mic permission, tap **Start**, and speak — the avatar signs.
+| Page | Where it runs | Purpose |
+| --- | --- | --- |
+| `/glasses` | Meta Ray-Ban Display | Capture **and** display: tries the on-glasses mic, signs the avatar + captions |
+| `/speak` (or `/`) | Phone/laptop browser | Companion mic page (fallback / second speaker) |
+
+Both connect to the same Node WebSocket server.
+
+**On the mic:** Meta's current [Web Apps docs](https://wearables.developer.meta.com/docs/develop/webapps/build)
+still list **Microphone** under *Unsupported Capabilities* for the Web App path
+(mic/camera are documented as native Device Access Toolkit only). The `/glasses`
+page nonetheless requests the mic directly via `getUserMedia` from a user gesture
+(the **Start** press, as the docs require for permission prompts):
+
+- If your glasses firmware exposes the mic, it captures and signs **fully on-device**.
+- If the runtime blocks it, the page falls back to **display-only** and prompts
+  you to open `/speak` on your phone.
+
+The `/glasses` page follows the platform constraints: fixed **600×600** viewport,
+no scrolling, black background (renders transparent on the waveguide) with bright
+high-contrast UI, **88px** minimum targets, and **arrow-key/Enter** D-pad focus
+navigation between the focusable **Start** and **Reset** controls (Neural Band /
+captouch). It auto-connects and auto-reconnects.
+
+### Load it on the glasses
+
+1. Deploy over **HTTPS** (Railway already does this).
+2. In the **Meta AI app** → Settings → App Info, tap the version number **5×** to enable **Developer Mode**.
+3. In the Meta AI app → your **Display Glasses** → **App connections → Web apps → Add a web app**, enter:
+   ```
+   https://<your-railway-domain>/glasses
+   ```
+4. On the glasses, focus **Start** (D-pad) and press **Enter** to grant mic permission and begin signing on-device. If the mic is blocked, open `https://<your-railway-domain>/speak` on your phone instead, tap **Start**, and speak — the glasses sign in real time.
+
+> Requirements (Meta docs): glasses software **v125+**, Meta AI app **v272+**.
+> You can preview `/glasses` in a desktop browser sized to 600×600 before loading it on-device.
 
 ## Test the Python server independently
 

@@ -37,6 +37,14 @@ AVATAR_Y_OFFSET = float(os.environ.get("AVATAR_Y_OFFSET", "-45"))
 POSE_CACHE_SIZE = max(0, int(os.environ.get("POSE_CACHE_SIZE", "128")))
 POSE_GENERATION_TIMEOUT = float(os.environ.get("POSE_GENERATION_TIMEOUT", "30"))
 
+# MediaPipe Holistic stores ~468 face-mesh landmarks — roughly 85% of every
+# .pose payload — versus 33 body + 21+21 hand points. Dropping the dense face
+# mesh shrinks each clip ~6-7x, which dramatically cuts both the WebSocket
+# transfer and the pose-viewer render cost on low-power clients like the
+# Meta Ray-Ban Display glasses. The body landmarks still include nose/eyes/ears,
+# so the avatar keeps a rough head. Set STRIP_FACE=0 to keep the full face mesh.
+STRIP_FACE = os.environ.get("STRIP_FACE", "1").lower() not in ("0", "false", "no")
+
 _pose_cache: OrderedDict[str, bytes] = OrderedDict()
 _pose_cache_lock = Lock()
 
@@ -153,7 +161,6 @@ def _cache_set(text: str, pose_bytes: bytes) -> None:
         while len(_pose_cache) > POSE_CACHE_SIZE:
             _pose_cache.popitem(last=False)
 
-
 # ---------------------------------------------------------------------------
 # Sign recognition helpers
 # ---------------------------------------------------------------------------
@@ -247,41 +254,56 @@ def _load_lexicon_features() -> None:
     print(f"[Recognize] {loaded} sign feature(s) loaded, {failed} skipped.")
 
 
-def generate_pose(text: str) -> bytes:
+def generate_pose(text: str, retries: int = 2) -> bytes:
     """Run the `text_to_gloss_to_pose` CLI and return the raw .pose bytes.
 
     Uses a unique temp file per call so concurrent requests don't collide.
+
+    `spoken-to-signed` reads pose files across a thread pool, and the
+    pose_format binary reader occasionally races on long, fingerspelling-heavy
+    utterances ("buffer is too small for requested array"). The failure is
+    transient — a retry reliably succeeds — so we retry a couple of times
+    before giving up.
     """
     cached = _cache_get(text)
     if cached is not None:
         return cached
 
-    fd, out_path = tempfile.mkstemp(suffix=".pose")
-    os.close(fd)
-    try:
-        result = subprocess.run(
-            [
-                CLI,
-                "--text", text,
-                "--glosser", "simple",
-                "--spoken-language", "en",
-                "--signed-language", "ase",
-                "--lexicon", LEXICON_DIR,
-                "--pose", out_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=POSE_GENERATION_TIMEOUT,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"text_to_gloss_to_pose failed: {result.stderr}")
-        with open(out_path, "rb") as f:
-            pose_bytes = _postprocess_pose(f.read())
-        _cache_set(text, pose_bytes)
-        return pose_bytes
-    finally:
-        if os.path.exists(out_path):
-            os.unlink(out_path)
+    last_err = None
+    for attempt in range(retries + 1):
+        fd, out_path = tempfile.mkstemp(suffix=".pose")
+        os.close(fd)
+        try:
+            result = subprocess.run(
+                [
+                    CLI,
+                    "--text", text,
+                    "--glosser", "simple",
+                    "--spoken-language", "en",
+                    "--signed-language", "ase",
+                    "--lexicon", LEXICON_DIR,
+                    "--pose", out_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=POSE_GENERATION_TIMEOUT,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"text_to_gloss_to_pose failed: {result.stderr}")
+            with open(out_path, "rb") as f:
+                pose_bytes = _postprocess_pose(f.read())
+            _cache_set(text, pose_bytes)
+            return pose_bytes
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                print(f"[Pose] attempt {attempt + 1} failed ({str(e)[:80]}); retrying")
+                continue
+            raise
+        finally:
+            if os.path.exists(out_path):
+                os.unlink(out_path)
+    raise last_err
 
 
 def _postprocess_pose(pose_bytes: bytes) -> bytes:
@@ -292,10 +314,25 @@ def _postprocess_pose(pose_bytes: bytes) -> bytes:
         pose = Pose.read(pose_bytes)
         if STABILIZE_BODY_SIZE:
             _stabilize_body_size(pose)
-        if STABILIZE_FACE_SIZE:
+        # Skip face stabilization when we're about to discard the face mesh.
+        if STABILIZE_FACE_SIZE and not STRIP_FACE:
             _stabilize_face_size(pose)
         if AVATAR_Y_OFFSET:
             _shift_avatar_y(pose, AVATAR_Y_OFFSET)
+
+        # Drop the heavy face mesh last (after any landmark adjustments that rely
+        # on its slices). Keep body + hands so the avatar stays light to send and
+        # render on low-power clients.
+        if STRIP_FACE:
+            keep = [c.name for c in pose.header.components
+                    if c.name.upper() != "FACE_LANDMARKS"]
+            if 0 < len(keep) < len(pose.header.components):
+                try:
+                    pose = pose.get_components(keep)
+                except Exception as e:
+                    print(f"[Pose] Face strip skipped: {e}")
+
+        # Apply playback speed last so it survives any component changes above.
         if SIGN_SPEED != 1.0:
             pose.body.fps = pose.body.fps * SIGN_SPEED
 

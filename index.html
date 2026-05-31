@@ -192,7 +192,10 @@ function resetSigning(notifyServer = true) {
 
 signer.addEventListener('ended$', () => playNext());
 
-displayWS = new WebSocket(`ws://${location.host}`);
+// Use wss:// when the page is served over HTTPS, otherwise browsers block the
+// insecure ws:// connection as mixed content.
+const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+displayWS = new WebSocket(`${wsProto}://${location.host}`);
 displayWS.binaryType = 'arraybuffer';
 displayWS.onopen  = () => setStatus('live', 'Live');
 displayWS.onclose = () => setStatus('error', 'Disconnected');
