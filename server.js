@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import fetch from 'node-fetch';
 import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
+import OpenAI from 'openai';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -18,6 +19,60 @@ if (!DEEPGRAM_API_KEY) {
 const POSE_SERVER_URL = process.env.POSE_SERVER_URL || 'http://localhost:8000';
 
 const deepgram = createClient(DEEPGRAM_API_KEY);
+
+// --- English -> ASL gloss via OpenAI -------------------------------------- //
+// Small/fast model keeps latency low. If no key is set, we sign the raw
+// transcript (the Python glosser still lemmatizes + fingerspells unknowns), so
+// the app degrades gracefully.
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const GLOSS_TIMEOUT_MS = Number(process.env.GLOSS_TIMEOUT_MS || 1500);
+
+const openai = OPENAI_API_KEY
+  ? new OpenAI({ apiKey: OPENAI_API_KEY, timeout: GLOSS_TIMEOUT_MS, maxRetries: 0 })
+  : null;
+
+if (!openai) {
+  console.warn('[Gloss] OPENAI_API_KEY not set — signing raw transcript (no ASL gloss).');
+} else {
+  console.log(`[Gloss] ASL glossing enabled with model "${OPENAI_MODEL}".`);
+}
+
+const GLOSS_SYSTEM_PROMPT =
+  'You are an expert American Sign Language (ASL) interpreter. Convert the ' +
+  "English text into ASL gloss. Rules: use ASL grammar and word order " +
+  '(topic-comment, time first); drop articles (a/an/the) and forms of "to be" ' +
+  '(is/am/are/was/were); use uninflected base words (no -ing/-ed/plural -s); ' +
+  'keep WH question words (what/who/where/when/why/how) in natural ASL position; ' +
+  'expand contractions. Output ONLY the gloss as space-separated UPPERCASE words ' +
+  'with no punctuation and no commentary.';
+
+// Cache so repeated phrases ("hello", "thank you") cost nothing after the first.
+const glossCache = new Map();
+
+async function englishToAslGloss(text) {
+  if (!openai) return text;
+  const key = text.toLowerCase().trim();
+  if (glossCache.has(key)) return glossCache.get(key);
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_MODEL,
+      temperature: 0,
+      max_tokens: 60,
+      messages: [
+        { role: 'system', content: GLOSS_SYSTEM_PROMPT },
+        { role: 'user', content: text },
+      ],
+    });
+    const gloss = completion.choices?.[0]?.message?.content?.trim();
+    const result = gloss && gloss.length ? gloss : text;
+    glossCache.set(key, result);
+    return result;
+  } catch (err) {
+    console.error('[Gloss] OpenAI failed, using raw text:', err.message);
+    return text; // graceful fallback — never block the avatar on the API
+  }
+}
 
 const app = express();
 app.get('/', (req, res) => {
@@ -92,13 +147,13 @@ wss.on('connection', (ws, request) => {
   audioClients.add(ws);
   console.log('Audio client connected — opening Deepgram live session.');
 
-  // Word batching: collect finalized words and emit a pose for every WORDS_PER_CHUNK
-  // words. Leftover words are carried forward and flushed at the end of each
-  // utterance (speech_final) and when the connection closes — so a full sentence
-  // gets signed in order instead of being cut off by the next transcript.
-  const WORDS_PER_CHUNK = 4;
+  // Sentence-level batching: ASL gloss reordering needs a whole clause, so we
+  // accumulate finalized words and flush a full utterance at a time — on
+  // speech_final (end of utterance), at a safety cap (so a long monologue still
+  // signs), and on disconnect. Each utterance is glossed to ASL then signed.
+  const MAX_BUFFERED_WORDS = 16;
   let wordBuffer = [];
-  // Serialize pose generation per connection so clips are broadcast in order.
+  // Serialize gloss+pose generation per connection so clips are broadcast in order.
   let poseChain = Promise.resolve();
 
   const session = {
@@ -113,7 +168,9 @@ wss.on('connection', (ws, request) => {
     const generation = poseGeneration;
     poseChain = poseChain
       .then(async () => {
-        const arrayBuffer = await generatePose(text);
+        const gloss = await englishToAslGloss(text);
+        if (gloss !== text) console.log(`[Gloss] "${text}" -> "${gloss}"`);
+        const arrayBuffer = await generatePose(gloss);
         if (arrayBuffer && generation === poseGeneration) {
           broadcastToDisplays(Buffer.from(arrayBuffer));
         }
@@ -121,11 +178,8 @@ wss.on('connection', (ws, request) => {
       .catch((err) => console.error('[Pose] generation error:', err));
   }
 
-  function drainChunks(flushRemainder) {
-    while (wordBuffer.length >= WORDS_PER_CHUNK) {
-      enqueuePose(wordBuffer.splice(0, WORDS_PER_CHUNK).join(' '));
-    }
-    if (flushRemainder && wordBuffer.length > 0) {
+  function flushUtterance() {
+    if (wordBuffer.length > 0) {
       enqueuePose(wordBuffer.splice(0).join(' '));
     }
   }
@@ -164,8 +218,11 @@ wss.on('connection', (ws, request) => {
       const words = transcript.trim().split(/\s+/).filter(Boolean);
       if (words.length) wordBuffer.push(...words);
 
-      // Emit full 4-word chunks now; flush the tail at the end of an utterance.
-      drainChunks(Boolean(data.speech_final));
+      // Flush a full utterance at end-of-speech, or when the buffer gets long
+      // enough that we shouldn't keep waiting.
+      if (data.speech_final || wordBuffer.length >= MAX_BUFFERED_WORDS) {
+        flushUtterance();
+      }
     });
 
     dgLive.on(LiveTranscriptionEvents.Error, (err) => {
@@ -193,8 +250,8 @@ wss.on('connection', (ws, request) => {
     audioClients.delete(ws);
     audioSessions.delete(session);
     console.log('Audio client disconnected — finishing Deepgram session.');
-    // Sign whatever words are left over so the final partial chunk isn't dropped.
-    drainChunks(true);
+    // Sign whatever words are left over so the final utterance isn't dropped.
+    flushUtterance();
     try {
       if (dgLive) dgLive.finish();
     } catch (err) {
