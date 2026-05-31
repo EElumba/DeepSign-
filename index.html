@@ -28,12 +28,15 @@
       background: rgba(255,255,255,0.06); border-radius: 6px; padding: 6px 8px;
     }
     pose-viewer { width: 100%; height: 300px; background: #111; border-radius: 6px; flex: 1; }
-    #micBtn {
+    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    button {
       padding: 12px; font-size: 14px; font-weight: 600; font-family: monospace;
-      color: #fff; background: #2ecc71; border: none; border-radius: 8px; cursor: pointer;
+      color: #fff; border: none; border-radius: 8px; cursor: pointer;
     }
+    #micBtn { background: #2ecc71; }
     #micBtn.recording { background: #e74c3c; }
-    #micBtn:disabled { opacity: 0.5; cursor: default; }
+    #resetBtn { background: #555; }
+    button:disabled { opacity: 0.5; cursor: default; }
   </style>
 </head>
 <body>
@@ -41,7 +44,10 @@
     <div id="bar"><span id="dot"></span><span id="status-text">Connecting</span></div>
     <div id="transcript"></div>
     <pose-viewer id="signer" autoplay></pose-viewer>
-    <button id="micBtn">Start</button>
+    <div class="controls">
+      <button id="micBtn">Start</button>
+      <button id="resetBtn" type="button">Reset</button>
+    </div>
   </div>
 
   <script>
@@ -49,6 +55,7 @@
     const statusText = document.getElementById('status-text');
     const transcriptEl = document.getElementById('transcript');
     const signer = document.getElementById('signer');
+    const resetBtn = document.getElementById('resetBtn');
 
     function setStatus(state, text) {
       dot.className = state === 'live' ? 'live' : state === 'error' ? 'error' : '';
@@ -63,11 +70,16 @@
     let currentUrl = null;
     let playing = false;
     let watchdog = null;
+    let displayWS = null;
     const WATCHDOG_MS = 30000; // safety net in case `ended$` never fires
 
     function enqueuePose(blob) {
       poseQueue.push(URL.createObjectURL(blob));
       if (!playing) playNext();
+    }
+
+    function clearPoseQueue() {
+      while (poseQueue.length) URL.revokeObjectURL(poseQueue.shift());
     }
 
     function playNext() {
@@ -107,11 +119,23 @@
       try { signer.removeAttribute('src'); } catch (e) {}
     }
 
+    function resetSigning(notifyServer = true) {
+      if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+      clearPoseQueue();
+      if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
+      playing = false;
+      stopSigning();
+      transcriptEl.textContent = '';
+      if (notifyServer && displayWS && displayWS.readyState === WebSocket.OPEN) {
+        displayWS.send(JSON.stringify({ type: 'reset' }));
+      }
+    }
+
     // pose-viewer fires `ended$` when a clip finishes (it must NOT have `loop`).
     signer.addEventListener('ended$', () => playNext());
 
     // --- Display WebSocket (binary .pose + JSON transcript metadata) ---
-    const displayWS = new WebSocket(`ws://${location.host}`);
+    displayWS = new WebSocket(`ws://${location.host}`);
     displayWS.binaryType = 'arraybuffer';
     displayWS.onopen = () => setStatus('live', 'Live');
     displayWS.onclose = () => setStatus('error', 'Error');
@@ -127,6 +151,8 @@
         try { msg = JSON.parse(event.data); } catch (e) { return; }
         if (msg.type === 'transcript') {
           transcriptEl.textContent = msg.text;
+        } else if (msg.type === 'reset') {
+          resetSigning(false);
         }
       }
     };
@@ -203,6 +229,8 @@
         micBtn.disabled = false;
       }
     });
+
+    resetBtn.addEventListener('click', () => resetSigning(true));
   </script>
 </body>
 </html>

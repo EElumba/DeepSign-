@@ -30,6 +30,8 @@ const wss = new WebSocketServer({ server });
 // Separate connection sets so the audio handler knows who to broadcast to.
 const audioClients = new Set();
 const displayClients = new Set();
+const audioSessions = new Set();
+let poseGeneration = 0;
 
 // Ask the Python server to turn text into a .pose binary. Returns an
 // ArrayBuffer, or null on failure (caller should skip the broadcast).
@@ -59,6 +61,13 @@ function broadcastToDisplays(data) {
   }
 }
 
+function resetPosePlayback() {
+  poseGeneration += 1;
+  for (const session of audioSessions) session.reset();
+  broadcastToDisplays(JSON.stringify({ type: 'reset' }));
+  console.log(`[Pose] Reset playback and cleared pending generation ${poseGeneration}.`);
+}
+
 wss.on('connection', (ws, request) => {
   const isAudio = (request.url || '/').startsWith('/audio');
 
@@ -68,6 +77,14 @@ wss.on('connection', (ws, request) => {
     ws.on('close', () => {
       displayClients.delete(ws);
       console.log(`Display client disconnected (${displayClients.size} total).`);
+    });
+    ws.on('message', (message) => {
+      try {
+        const msg = JSON.parse(message.toString());
+        if (msg.type === 'reset') resetPosePlayback();
+      } catch {
+        // Display clients only send small JSON control messages.
+      }
     });
     return;
   }
@@ -84,11 +101,22 @@ wss.on('connection', (ws, request) => {
   // Serialize pose generation per connection so clips are broadcast in order.
   let poseChain = Promise.resolve();
 
+  const session = {
+    reset() {
+      wordBuffer = [];
+      poseChain = Promise.resolve();
+    },
+  };
+  audioSessions.add(session);
+
   function enqueuePose(text) {
+    const generation = poseGeneration;
     poseChain = poseChain
       .then(async () => {
         const arrayBuffer = await generatePose(text);
-        if (arrayBuffer) broadcastToDisplays(Buffer.from(arrayBuffer));
+        if (arrayBuffer && generation === poseGeneration) {
+          broadcastToDisplays(Buffer.from(arrayBuffer));
+        }
       })
       .catch((err) => console.error('[Pose] generation error:', err));
   }
@@ -163,6 +191,7 @@ wss.on('connection', (ws, request) => {
 
   ws.on('close', () => {
     audioClients.delete(ws);
+    audioSessions.delete(session);
     console.log('Audio client disconnected — finishing Deepgram session.');
     // Sign whatever words are left over so the final partial chunk isn't dropped.
     drainChunks(true);
