@@ -146,41 +146,56 @@ def _cache_set(text: str, pose_bytes: bytes) -> None:
             _pose_cache.popitem(last=False)
 
 
-def generate_pose(text: str) -> bytes:
+def generate_pose(text: str, retries: int = 2) -> bytes:
     """Run the `text_to_gloss_to_pose` CLI and return the raw .pose bytes.
 
     Uses a unique temp file per call so concurrent requests don't collide.
+
+    `spoken-to-signed` reads pose files across a thread pool, and the
+    pose_format binary reader occasionally races on long, fingerspelling-heavy
+    utterances ("buffer is too small for requested array"). The failure is
+    transient — a retry reliably succeeds — so we retry a couple of times
+    before giving up.
     """
     cached = _cache_get(text)
     if cached is not None:
         return cached
 
-    fd, out_path = tempfile.mkstemp(suffix=".pose")
-    os.close(fd)
-    try:
-        result = subprocess.run(
-            [
-                CLI,
-                "--text", text,
-                "--glosser", "simple",
-                "--spoken-language", "en",
-                "--signed-language", "ase",
-                "--lexicon", LEXICON_DIR,
-                "--pose", out_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=POSE_GENERATION_TIMEOUT,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"text_to_gloss_to_pose failed: {result.stderr}")
-        with open(out_path, "rb") as f:
-            pose_bytes = _postprocess_pose(f.read())
-        _cache_set(text, pose_bytes)
-        return pose_bytes
-    finally:
-        if os.path.exists(out_path):
-            os.unlink(out_path)
+    last_err = None
+    for attempt in range(retries + 1):
+        fd, out_path = tempfile.mkstemp(suffix=".pose")
+        os.close(fd)
+        try:
+            result = subprocess.run(
+                [
+                    CLI,
+                    "--text", text,
+                    "--glosser", "simple",
+                    "--spoken-language", "en",
+                    "--signed-language", "ase",
+                    "--lexicon", LEXICON_DIR,
+                    "--pose", out_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=POSE_GENERATION_TIMEOUT,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"text_to_gloss_to_pose failed: {result.stderr}")
+            with open(out_path, "rb") as f:
+                pose_bytes = _postprocess_pose(f.read())
+            _cache_set(text, pose_bytes)
+            return pose_bytes
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                print(f"[Pose] attempt {attempt + 1} failed ({str(e)[:80]}); retrying")
+                continue
+            raise
+        finally:
+            if os.path.exists(out_path):
+                os.unlink(out_path)
+    raise last_err
 
 
 def _postprocess_pose(pose_bytes: bytes) -> bytes:
