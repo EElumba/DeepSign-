@@ -4,6 +4,7 @@ import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { randomUUID } from 'crypto';
 import fetch from 'node-fetch';
 import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
 import OpenAI from 'openai';
@@ -21,6 +22,8 @@ if (!DEEPGRAM_API_KEY) {
 const POSE_SERVER_URL = (process.env.POSE_SERVER_URL || 'http://localhost:8000').replace(/\/+$/, '');
 const FINAL_FLUSH_DELAY_MS = Number(process.env.FINAL_FLUSH_DELAY_MS || 120);
 const POSE_TIMEOUT_MS = Number(process.env.POSE_TIMEOUT_MS || 30000);
+const ROOM_IDLE_TTL_MS = Number(process.env.ROOM_IDLE_TTL_MS || 60000);
+const ROOM_ID_PATTERN = /^[a-zA-Z0-9_-]{6,80}$/;
 
 const deepgram = createClient(DEEPGRAM_API_KEY);
 
@@ -42,6 +45,21 @@ if (!openai) {
 } else {
   console.log(`[Gloss] ASL glossing enabled with model "${OPENAI_MODEL}".`);
 }
+
+// --- ElevenLabs TTS (Sign→Speak mode) ------------------------------------- //
+const ELEVENLABS_API_KEY  = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM';
+
+if (!ELEVENLABS_API_KEY) {
+  console.warn('[TTS] ELEVENLABS_API_KEY not set — /api/tts will return 503.');
+} else {
+  console.log('[TTS] ElevenLabs TTS enabled.');
+}
+
+const GLOSS_TO_ENGLISH_PROMPT =
+  'You are an ASL interpreter. Convert ASL gloss notation into natural spoken English. ' +
+  'ASL gloss uses base word forms, no articles, and topic-comment word order. ' +
+  'Output only the English sentence — no commentary, no extra punctuation.';
 
 const GLOSS_SYSTEM_PROMPT =
   'You are an expert American Sign Language (ASL) interpreter. Convert the ' +
@@ -101,19 +119,67 @@ async function englishToAslGloss(text) {
 }
 
 const app = express();
+app.use(express.json({ limit: '5mb' }));
 
-// Speaker/controller page (phone or laptop): captures the mic and streams audio.
-// Meta Ray-Ban Display Web Apps cannot access the microphone, so voice capture
-// must happen here, not on the glasses.
-app.get(['/', '/speak'], (req, res) => {
-  res.sendFile(join(__dirname, 'index.html'));
+function createRoomId() {
+  return randomUUID().replace(/-/g, '');
+}
+
+function normalizeRoomId(value) {
+  const roomId = String(value || '').trim();
+  return ROOM_ID_PATTERN.test(roomId) ? roomId : '';
+}
+
+function roomPath(pathname, roomId) {
+  return `${pathname}?room=${encodeURIComponent(roomId)}`;
+}
+
+function roomFromHttpRequest(req) {
+  return normalizeRoomId(req.query?.room);
+}
+
+function sendRoomPage(req, res, pathname, filename) {
+  const roomId = roomFromHttpRequest(req);
+  if (!roomId) {
+    res.redirect(302, roomPath(pathname, createRoomId()));
+    return;
+  }
+  res.sendFile(join(__dirname, filename));
+}
+
+// Landing/migration route: every fresh visit gets a private room by default.
+app.get('/', (req, res) => {
+  res.redirect(302, roomPath('/speak', createRoomId()));
 });
 
-// Glasses display page: the Meta Ray-Ban Display Web App URL. Display-only
-// (no mic), 600x600, optimized for the see-through waveguide. Add THIS URL in
-// the Meta AI app (Developer Mode) → Display Glasses → App connections.
+// Speaker/controller page (phone or laptop): captures the mic and streams audio.
+app.get('/speak', (req, res) => {
+  sendRoomPage(req, res, '/speak', 'index.html');
+});
+
+// Programmatic room creation hook for future QR/pairing flows.
+app.get('/api/sessions/new', (req, res) => {
+  const roomId = createRoomId();
+  res.json({
+    roomId,
+    speakUrl: roomPath('/speak', roomId),
+    glassesUrl: roomPath('/glasses', roomId),
+    audioWsPath: `/ws/audio/${roomId}`,
+    displayWsPath: `/ws/display/${roomId}`,
+  });
+});
+
+// Glasses display page: the Meta Ray-Ban Display Web App URL. Use the same
+// room query param as /speak to pair the two clients.
 app.get('/glasses', (req, res) => {
-  res.sendFile(join(__dirname, 'glasses.html'));
+  sendRoomPage(req, res, '/glasses', 'glasses.html');
+});
+
+// Backwards-compatible alias for older bookmarks.
+app.get('/room/:roomId', (req, res) => {
+  const roomId = normalizeRoomId(req.params.roomId);
+  if (!roomId) return res.status(400).send('Invalid room id');
+  res.redirect(302, roomPath('/speak', roomId));
 });
 
 // Web App manifest + favicon (the glasses runtime requires a PNG icon; SVG is
@@ -127,14 +193,163 @@ app.get('/icon.png', (req, res) => {
   });
 });
 
+// Sign->Speak REST endpoints.
+
+// Proxy landmark frames to the Python recognizer
+app.post('/api/recognize', async (req, res) => {
+  try {
+    const r = await fetch(`${POSE_SERVER_URL}/recognize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body),
+    });
+    if (!r.ok) return res.status(r.status).json({ error: 'Recognition failed' });
+    res.json(await r.json());
+  } catch (err) {
+    console.error('[Recognize]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Convert ASL gloss to natural English via OpenAI
+app.post('/api/gloss-to-english', async (req, res) => {
+  const { gloss } = req.body || {};
+  if (!gloss) return res.status(400).json({ error: 'gloss required' });
+  if (!openai) return res.json({ text: gloss }); // graceful fallback
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_MODEL,
+      temperature: 0.3,
+      max_tokens: 80,
+      messages: [
+        { role: 'system', content: GLOSS_TO_ENGLISH_PROMPT },
+        { role: 'user', content: gloss },
+      ],
+    });
+    res.json({ text: completion.choices[0].message.content.trim() });
+  } catch (err) {
+    console.error('[Gloss→EN]', err.message);
+    res.json({ text: gloss }); // return raw gloss on failure
+  }
+});
+
+// ElevenLabs TTS proxy — keeps the API key server-side
+app.post('/api/tts', async (req, res) => {
+  const { text } = req.body || {};
+  if (!text) return res.status(400).json({ error: 'text required' });
+  if (!ELEVENLABS_API_KEY) return res.status(503).json({ error: 'ELEVENLABS_API_KEY not configured' });
+
+  try {
+    const r = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+      {
+        method: 'POST',
+        headers: {
+          'xi-api-key': ELEVENLABS_API_KEY,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text,
+          model_id: 'eleven_multilingual_v2',
+          voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+        }),
+      }
+    );
+    if (!r.ok) {
+      const errText = await r.text();
+      console.error('[TTS] ElevenLabs error:', errText);
+      return res.status(500).json({ error: 'TTS request failed' });
+    }
+    res.set('Content-Type', 'audio/mpeg');
+    r.body.pipe(res);
+  } catch (err) {
+    console.error('[TTS]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
-// Separate connection sets so the audio handler knows who to broadcast to.
-const audioClients = new Set();
-const displayClients = new Set();
-const audioSessions = new Set();
-let poseGeneration = 0;
+// Room-local state. A room represents one private conversation. All transcripts,
+// pose blobs, and control messages stay inside its display client set.
+const rooms = new Map();
+
+function getRoom(roomId) {
+  let room = rooms.get(roomId);
+  if (!room) {
+    room = {
+      id: roomId,
+      displayClients: new Set(),
+      audioSessions: new Set(),
+      poseGeneration: 0,
+      cleanupTimer: null,
+      createdAt: Date.now(),
+      lastActivityAt: Date.now(),
+    };
+    rooms.set(roomId, room);
+    console.log(`[Room ${roomId}] created (${rooms.size} active room(s)).`);
+  }
+  room.lastActivityAt = Date.now();
+  if (room.cleanupTimer) {
+    clearTimeout(room.cleanupTimer);
+    room.cleanupTimer = null;
+  }
+  return room;
+}
+
+function roomHasClients(room) {
+  return room.displayClients.size > 0 || room.audioSessions.size > 0;
+}
+
+function releaseRoom(room) {
+  room.lastActivityAt = Date.now();
+  if (roomHasClients(room) || room.cleanupTimer) return;
+
+  room.cleanupTimer = setTimeout(() => {
+    const current = rooms.get(room.id);
+    if (!current || roomHasClients(current)) return;
+    rooms.delete(room.id);
+    console.log(`[Room ${room.id}] cleaned up (${rooms.size} active room(s)).`);
+  }, ROOM_IDLE_TTL_MS);
+}
+
+function parseWebSocketRequest(request) {
+  const url = new URL(request.url || '/', 'http://localhost');
+  const parts = url.pathname.split('/').filter(Boolean);
+
+  let role = 'display';
+  let roomId = '';
+
+  if (parts[0] === 'ws' && (parts[1] === 'audio' || parts[1] === 'display')) {
+    role = parts[1];
+    roomId = normalizeRoomId(parts[2]) || normalizeRoomId(url.searchParams.get('room'));
+  } else if (parts[0] === 'audio') {
+    // Compatibility: older clients can move from /audio to /audio?room=<id>.
+    role = 'audio';
+    roomId = normalizeRoomId(parts[1]) || normalizeRoomId(url.searchParams.get('room'));
+  } else {
+    // Compatibility: display clients may still connect to /?room=<id>.
+    role = 'display';
+    roomId = normalizeRoomId(url.searchParams.get('room'));
+  }
+
+  return { role, roomId };
+}
+
+function rejectWebSocket(ws, reason) {
+  try {
+    ws.send(JSON.stringify({ type: 'error', error: reason }));
+  } catch {
+    // The connection may already be closing.
+  }
+  try {
+    ws.close(1008, reason);
+  } catch {
+    // Nothing else to do.
+  }
+}
 
 // Ask the Python server to turn text into a .pose binary. Returns an
 // ArrayBuffer, or null on failure (caller should skip the broadcast).
@@ -164,35 +379,43 @@ async function generatePose(text) {
   }
 }
 
-function broadcastToDisplays(data) {
-  for (const client of displayClients) {
+function broadcastToRoom(room, data) {
+  room.lastActivityAt = Date.now();
+  for (const client of room.displayClients) {
     if (client.readyState === 1) {
       client.send(data);
     }
   }
 }
 
-function resetPosePlayback() {
-  poseGeneration += 1;
-  for (const session of audioSessions) session.reset();
-  broadcastToDisplays(JSON.stringify({ type: 'reset' }));
-  console.log(`[Pose] Reset playback and cleared pending generation ${poseGeneration}.`);
+function resetRoomPlayback(room) {
+  room.poseGeneration += 1;
+  for (const session of room.audioSessions) session.reset();
+  broadcastToRoom(room, JSON.stringify({ type: 'reset', roomId: room.id }));
+  console.log(`[Room ${room.id}] Reset playback and cleared pending generation ${room.poseGeneration}.`);
 }
 
 wss.on('connection', (ws, request) => {
-  const isAudio = (request.url || '/').startsWith('/audio');
+  const { role, roomId } = parseWebSocketRequest(request);
+  if (!roomId) {
+    rejectWebSocket(ws, 'A valid room id is required.');
+    return;
+  }
 
-  if (!isAudio) {
-    displayClients.add(ws);
-    console.log(`Display client connected (${displayClients.size} total).`);
+  const room = getRoom(roomId);
+
+  if (role === 'display') {
+    room.displayClients.add(ws);
+    console.log(`[Room ${room.id}] Display client connected (${room.displayClients.size} display client(s)).`);
     ws.on('close', () => {
-      displayClients.delete(ws);
-      console.log(`Display client disconnected (${displayClients.size} total).`);
+      room.displayClients.delete(ws);
+      console.log(`[Room ${room.id}] Display client disconnected (${room.displayClients.size} display client(s)).`);
+      releaseRoom(room);
     });
     ws.on('message', (message) => {
       try {
         const msg = JSON.parse(message.toString());
-        if (msg.type === 'reset') resetPosePlayback();
+        if (msg.type === 'reset') resetRoomPlayback(room);
       } catch {
         // Display clients only send small JSON control messages.
       }
@@ -200,8 +423,7 @@ wss.on('connection', (ws, request) => {
     return;
   }
 
-  audioClients.add(ws);
-  console.log('Audio client connected — opening Deepgram live session.');
+  console.log(`[Room ${room.id}] Audio client connected — opening Deepgram live session.`);
 
   // Sentence-level batching: ASL gloss reordering needs a whole clause, so we
   // accumulate finalized words and flush a full utterance at a time — on
@@ -223,18 +445,18 @@ wss.on('connection', (ws, request) => {
       poseChain = Promise.resolve();
     },
   };
-  audioSessions.add(session);
+  room.audioSessions.add(session);
 
   function enqueuePose(text) {
-    const generation = poseGeneration;
+    const generation = room.poseGeneration;
     poseChain = poseChain
       .then(async () => {
         const signableText = expandDigitsForSigning(text);
         const gloss = expandDigitsForSigning(await englishToAslGloss(signableText));
         if (gloss !== text) console.log(`[Gloss] "${text}" -> "${gloss}"`);
         const arrayBuffer = await generatePose(gloss);
-        if (arrayBuffer && generation === poseGeneration) {
-          broadcastToDisplays(Buffer.from(arrayBuffer));
+        if (arrayBuffer && generation === room.poseGeneration) {
+          broadcastToRoom(room, Buffer.from(arrayBuffer));
         }
       })
       .catch((err) => console.error('[Pose] generation error:', err));
@@ -277,8 +499,9 @@ wss.on('connection', (ws, request) => {
       if (!transcript) return;
 
       // Always push the transcript text for the on-screen display.
-      broadcastToDisplays(JSON.stringify({
+      broadcastToRoom(room, JSON.stringify({
         type: 'transcript',
+        roomId: room.id,
         text: transcript,
         is_final: data.is_final,
       }));
@@ -322,9 +545,8 @@ wss.on('connection', (ws, request) => {
   });
 
   ws.on('close', () => {
-    audioClients.delete(ws);
-    audioSessions.delete(session);
-    console.log('Audio client disconnected — finishing Deepgram session.');
+    room.audioSessions.delete(session);
+    console.log(`[Room ${room.id}] Audio client disconnected — finishing Deepgram session.`);
     // Sign whatever words are left over so the final utterance isn't dropped.
     flushUtterance();
     try {
@@ -332,6 +554,7 @@ wss.on('connection', (ws, request) => {
     } catch (err) {
       console.error('Error finishing Deepgram session:', err);
     }
+    releaseRoom(room);
   });
 
   ws.on('error', (err) => {
@@ -344,6 +567,6 @@ server.listen(PORT, () => {
   console.log(`ASL Pose MVP server listening on http://localhost:${PORT}`);
   console.log(`Make sure the Python pose server is running first:`);
   console.log(`  cd python && uvicorn server:app --port 8000`);
-  console.log(`Speaker page (mic, phone/laptop): /  or  /speak  — grant mic permission.`);
-  console.log(`Glasses page (Meta Ray-Ban Display Web App URL): /glasses  — display only.`);
+  console.log(`Speaker page: / redirects to /speak?room=<room-id>`);
+  console.log(`Glasses page: /glasses?room=<same-room-id>`);
 });

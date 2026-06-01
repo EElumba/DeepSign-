@@ -78,16 +78,29 @@
   </div>
 
   <script>
+    const ROOM_ID_PATTERN = /^[a-zA-Z0-9_-]{6,80}$/;
+    const roomId = new URLSearchParams(location.search).get('room') || '';
+    if (!ROOM_ID_PATTERN.test(roomId)) {
+      document.body.textContent = 'Missing or invalid room. Open /glasses to start a private session.';
+      throw new Error('Missing or invalid room id');
+    }
+
     const dot = document.getElementById('dot');
     const statusText = document.getElementById('status-text');
     const transcriptEl = document.getElementById('transcript');
     const signer = document.getElementById('signer');
     const micBtn = document.getElementById('micBtn');
     const resetBtn = document.getElementById('resetBtn');
+    const companionSpeakPath = `/speak?room=${encodeURIComponent(roomId)}`;
 
     function setStatus(state, text) {
       dot.className = state === 'live' ? 'live' : state === 'error' ? 'error' : '';
       statusText.textContent = text;
+    }
+
+    function wsUrl(role) {
+      const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+      return `${wsProto}://${location.host}/ws/${role}/${encodeURIComponent(roomId)}`;
     }
 
     // --- Pose playback queue ---
@@ -156,13 +169,19 @@
 
     signer.addEventListener('ended$', () => playNext());
 
+    let recording = false;
+    let stream = null;
+    let micWs = null;
+    let audioContext = null;
+    let source = null;
+    let processor = null;
+
     // --- Display WebSocket (binary .pose + JSON transcript metadata) ---
     // The glasses load this page over HTTPS, so we must use wss:// (the runtime
     // blocks insecure ws:// as mixed content). Reconnect automatically so the
     // hands-free display recovers without any interaction.
     function connect() {
-      const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-      displayWS = new WebSocket(`${wsProto}://${location.host}`);
+      displayWS = new WebSocket(wsUrl('display'));
       displayWS.binaryType = 'arraybuffer';
       displayWS.onopen = () => setStatus('live', recording ? 'Listening' : 'Live');
       displayWS.onclose = () => { setStatus('error', 'Reconnecting'); setTimeout(connect, 1500); };
@@ -186,22 +205,15 @@
     }
     connect();
 
-    // --- Mic capture on the glasses → /audio WebSocket (Int16 PCM @ 16kHz) ---
+    // --- Mic capture on the glasses → /ws/audio/<room> WebSocket (Int16 PCM @ 16kHz) ---
     // Per Meta's docs the mic permission must be requested from a user gesture
     // (the Start press / Enter). If the glasses runtime exposes the mic, this
     // captures on-device; if it blocks it, we fall back to display-only and tell
     // the wearer to use the companion /speak page on their phone.
-    let recording = false;
-    let stream = null;
-    let micWs = null;
-    let audioContext = null;
-    let source = null;
-    let processor = null;
-
     async function startMic() {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         setStatus('error', 'No mic — use /speak');
-        transcriptEl.textContent = 'Mic API unavailable on this device. Open /speak on your phone.';
+        transcriptEl.textContent = `Mic API unavailable on this device. Open ${companionSpeakPath} on your phone.`;
         return;
       }
       try {
@@ -209,12 +221,11 @@
       } catch (e) {
         console.error('Mic permission/availability error:', e);
         setStatus('error', 'No mic — use /speak');
-        transcriptEl.textContent = 'Mic blocked on glasses. Open /speak on your phone to talk.';
+        transcriptEl.textContent = `Mic blocked on glasses. Open ${companionSpeakPath} on your phone to talk.`;
         return;
       }
 
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      micWs = new WebSocket(`${proto}://${location.host}/audio`);
+      micWs = new WebSocket(wsUrl('audio'));
       micWs.binaryType = 'arraybuffer';
 
       const AudioCtx = window.AudioContext || window.webkitAudioContext;

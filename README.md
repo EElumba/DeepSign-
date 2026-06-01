@@ -7,9 +7,10 @@ and the [`pose-viewer`](https://www.npmjs.com/package/pose-viewer) web component
 animates the signer in the glasses browser.
 
 ```
-Mic → Node /audio WS → Deepgram Nova-3 → Node POST :8000/pose
+Mic → Node /ws/audio/<room> WS → Deepgram Nova-3 → Node POST :8000/pose
     → Python FastAPI (text_to_gloss_to_pose) → .pose binary
-    → Node broadcasts ArrayBuffer over WS → pose-viewer renders the signer
+    → Node sends ArrayBuffer to /ws/display/<room> clients only
+    → pose-viewer renders the signer
 ```
 
 ## Prerequisites
@@ -69,6 +70,30 @@ Wait for: `Application startup complete.` (the first request is pre-warmed on st
 npm start
 ```
 
+## Session rooms
+
+Every conversation now runs in an isolated room. A room ID is carried in the URL
+and used by both WebSocket roles:
+
+- Display/caption clients connect to `/ws/display/<room-id>`.
+- Microphone clients connect to `/ws/audio/<room-id>`.
+- Transcripts, pose blobs, and reset controls are delivered only to display
+  clients in that same room.
+
+Opening `/` or `/speak` without a room redirects to a fresh private session such
+as `/speak?room=7d2f...`. Use the same room ID on every device that should share
+one conversation:
+
+```text
+https://<your-domain>/speak?room=<room-id>
+https://<your-domain>/glasses?room=<room-id>
+```
+
+For programmatic pairing or QR-code flows, `GET /api/sessions/new` returns a
+fresh room ID plus the matching speak/glasses URLs. During migration, older
+WebSocket clients can still use `/audio?room=<room-id>` and `/?room=<room-id>`,
+but clients without a valid room are rejected instead of joining a global pool.
+
 ## Open on Meta Ray-Ban Display glasses (Web App)
 
 Meta Ray-Ban **Display** glasses run standalone Web Apps loaded by URL through
@@ -76,10 +101,12 @@ the Meta AI app. There are two ways to use the app:
 
 | Page | Where it runs | Purpose |
 | --- | --- | --- |
-| `/glasses` | Meta Ray-Ban Display | Capture **and** display: tries the on-glasses mic, signs the avatar + captions |
-| `/speak` (or `/`) | Phone/laptop browser | Companion mic page (fallback / second speaker) |
+| `/glasses?room=<id>` | Meta Ray-Ban Display | Capture **and** display: tries the on-glasses mic, signs the avatar + captions |
+| `/speak?room=<id>` (or `/`) | Phone/laptop browser | Companion mic page (fallback / second speaker) |
 
-Both connect to the same Node WebSocket server.
+Both must use the same room ID to participate in the same conversation. A bare
+`/glasses` URL creates its own isolated room, which is safe but not paired with a
+phone unless the room ID is shared.
 
 **On the mic:** Meta's current [Web Apps docs](https://wearables.developer.meta.com/docs/develop/webapps/build)
 still list **Microphone** under *Unsupported Capabilities* for the Web App path
@@ -101,11 +128,13 @@ captouch). It auto-connects and auto-reconnects.
 
 1. Deploy over **HTTPS** (Railway already does this).
 2. In the **Meta AI app** → Settings → App Info, tap the version number **5×** to enable **Developer Mode**.
-3. In the Meta AI app → your **Display Glasses** → **App connections → Web apps → Add a web app**, enter:
+3. Open `https://<your-railway-domain>/speak` on a phone/laptop first. It will
+   redirect to `https://<your-railway-domain>/speak?room=<room-id>`.
+4. In the Meta AI app → your **Display Glasses** → **App connections → Web apps → Add a web app**, enter the matching glasses URL:
    ```
-   https://<your-railway-domain>/glasses
+   https://<your-railway-domain>/glasses?room=<room-id>
    ```
-4. On the glasses, focus **Start** (D-pad) and press **Enter** to grant mic permission and begin signing on-device. If the mic is blocked, open `https://<your-railway-domain>/speak` on your phone instead, tap **Start**, and speak — the glasses sign in real time.
+5. On the glasses, focus **Start** (D-pad) and press **Enter** to grant mic permission and begin signing on-device. If the mic is blocked, keep the matching `https://<your-railway-domain>/speak?room=<room-id>` page open on your phone, tap **Start**, and speak — the glasses sign in real time.
 
 > Requirements (Meta docs): glasses software **v125+**, Meta AI app **v272+**.
 > You can preview `/glasses` in a desktop browser sized to 600×600 before loading it on-device.
