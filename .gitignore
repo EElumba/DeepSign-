@@ -239,3 +239,6 @@ public/avatar.vrm
 .venv-builder/
 .venv-b312/
 python/wlasl/
+
+#Extra files
+changelog.md

@@ -38,8 +38,8 @@ A single-page HTML/JS app. No framework, no build step. The UI has:
 
 1. User clicks "Start" → browser requests mic permission
 2. Raw 16 kHz PCM audio is captured via `AudioContext.createScriptProcessor`
-3. Audio chunks are streamed to the Node server over a WebSocket at `/audio`
-4. The server sends back binary `.pose` blobs (one per signed phrase)
+3. Audio chunks are streamed to the Node server over a room WebSocket at `/ws/audio/<room-id>`
+4. The server sends back binary `.pose` blobs to display clients in that same room
 5. Each blob is fed to the `<pose-viewer>` web component, which animates a skeleton avatar signing the phrase
 6. Phrases are queued so the avatar signs them in order
 7. Transcript text (from Deepgram) is shown above the avatar in real time
@@ -78,20 +78,30 @@ Built with Express + the `ws` WebSocket library. Runs on port 3000.
 | `GLOSS_TIMEOUT_MS` | Default 1500ms. OpenAI timeout; falls back gracefully. |
 | `FINAL_FLUSH_DELAY_MS` | Default 120ms. Safety flush delay for partial utterances. |
 
-### WebSocket Connection Types
+### Session Rooms and WebSocket Connection Types
 
-Two WebSocket connection pools are maintained:
+Each conversation is isolated in an in-memory room keyed by a URL-safe room ID.
+Opening `/` or `/speak` without a room redirects to `/speak?room=<room-id>`.
+Glasses and companion devices join the same conversation by using the same room
+query parameter.
 
-- **Audio clients** (`/audio` URL): Browsers streaming microphone PCM data
-- **Display clients** (root URL): Browsers waiting to receive `.pose` blobs and transcript JSON
+Each room maintains two WebSocket roles:
 
-When a browser connects via `/audio`:
+- **Audio clients** (`/ws/audio/<room-id>`): Browsers streaming microphone PCM data
+- **Display clients** (`/ws/display/<room-id>`): Browsers waiting to receive `.pose` blobs and transcript JSON
+
+During migration, `/audio?room=<room-id>` and `/?room=<room-id>` remain accepted
+as compatibility shims. WebSocket clients without a valid room ID are rejected.
+
+When a browser connects via `/ws/audio/<room-id>`:
 1. A **Deepgram live transcription session** is opened (`nova-3` model, 16 kHz mono PCM)
 2. Audio chunks from the browser are forwarded directly to Deepgram
 3. Deepgram fires `Transcript` events with interim + final results
-4. **Only finalized words** feed the pose pipeline (interim words may change)
-5. Words are buffered up to 16 words or until Deepgram signals `speech_final`
-6. The buffered phrase is **glossed to ASL** via OpenAI GPT then **posed** by the Python server
+4. Interim and final transcript messages are sent only to display clients in the same room
+5. **Only finalized words** feed the pose pipeline (interim words may change)
+6. Words are buffered up to 16 words or until Deepgram signals `speech_final`
+7. The buffered phrase is **glossed to ASL** via OpenAI GPT then **posed** by the Python server
+8. The resulting pose blob is sent only to display clients in that same room
 
 ### Speak → Sign Pipeline (per utterance)
 
@@ -100,12 +110,12 @@ Deepgram final transcript
   → expandDigitsForSigning()   (e.g. "3" → "three")
   → englishToAslGloss()        (OpenAI GPT: English → ASL gloss grammar)
   → generatePose()             (Python /pose endpoint → .pose binary)
-  → broadcastToDisplays()      (sends binary to all display WebSocket clients)
+  → broadcastToRoom()          (sends binary to display clients in that room)
 ```
 
 An LRU gloss cache (default 128 entries) avoids redundant OpenAI calls for repeated phrases.
 
-Pose generation is **serialized per connection** via a promise chain so clips broadcast in order.
+Pose generation is **serialized per audio connection** via a promise chain so clips from one speaker broadcast in order. Multiple rooms can run simultaneously. Multiple audio clients in the same room are allowed; their completed utterances may interleave at utterance boundaries.
 
 ### ASL Gloss Prompt (sent to OpenAI)
 
@@ -115,7 +125,10 @@ Pose generation is **serialized per connection** via a promise chain so clips br
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/` | Serves `index.html` |
+| `GET` | `/` | Redirects to a fresh `/speak?room=<room-id>` session |
+| `GET` | `/speak?room=<id>` | Serves `index.html` for the requested room |
+| `GET` | `/glasses?room=<id>` | Serves `glasses.html` for the requested room |
+| `GET` | `/api/sessions/new` | Returns a fresh room ID and matching client URLs |
 | `POST` | `/api/recognize` | Proxies landmark frames to Python `/recognize` |
 | `POST` | `/api/gloss-to-english` | Calls OpenAI to convert ASL gloss → natural English |
 | `POST` | `/api/tts` | Proxies text to ElevenLabs TTS; streams MP3 audio back |
@@ -241,13 +254,13 @@ Since WLASL clips come from different source videos (different frame sizes), thi
 
 ```
 Microphone (browser)
-  → PCM audio chunks (WebSocket /audio)
+  → PCM audio chunks (WebSocket /ws/audio/<room-id>)
   → Deepgram nova-3 (cloud STT)
   → Final transcript text
   → expandDigitsForSigning() (e.g. "3" → "three")
   → OpenAI GPT-4o-mini (English → ASL gloss)
   → Python /pose (text_to_gloss_to_pose CLI + postprocessing)
-  → .pose binary (WebSocket broadcast)
+  → .pose binary (WebSocket /ws/display/<room-id>)
   → <pose-viewer> web component (skeleton avatar animation)
 ```
 

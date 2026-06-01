@@ -123,12 +123,24 @@
 // ═══════════════════════════════════════════════════════════════════════════
 //  Shared
 // ═══════════════════════════════════════════════════════════════════════════
+const ROOM_ID_PATTERN = /^[a-zA-Z0-9_-]{6,80}$/;
+const roomId = new URLSearchParams(location.search).get('room') || '';
+if (!ROOM_ID_PATTERN.test(roomId)) {
+  document.body.textContent = 'Missing or invalid room. Open /speak to start a private session.';
+  throw new Error('Missing or invalid room id');
+}
+
 const dot        = document.getElementById('dot');
 const statusText = document.getElementById('status-text');
 
 function setStatus(state, text) {
   dot.className = state === 'live' ? 'live' : state === 'error' ? 'error' : '';
   statusText.textContent = text;
+}
+
+function wsUrl(role) {
+  const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${wsProto}://${location.host}/ws/${role}/${encodeURIComponent(roomId)}`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -194,10 +206,9 @@ signer.addEventListener('ended$', () => playNext());
 
 // Use wss:// when the page is served over HTTPS, otherwise browsers block the
 // insecure ws:// connection as mixed content.
-const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-displayWS = new WebSocket(`${wsProto}://${location.host}`);
+displayWS = new WebSocket(wsUrl('display'));
 displayWS.binaryType = 'arraybuffer';
-displayWS.onopen  = () => setStatus('live', 'Live');
+displayWS.onopen  = () => setStatus('live', `Live · ${roomId.slice(0, 6)}`);
 displayWS.onclose = () => setStatus('error', 'Disconnected');
 displayWS.onerror = () => setStatus('error', 'Error');
 displayWS.onmessage = (event) => {
@@ -228,8 +239,7 @@ async function startMic() {
     setStatus('error', 'Mic denied');
     return;
   }
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  micWs = new WebSocket(`${proto}://${location.host}/audio`);
+  micWs = new WebSocket(wsUrl('audio'));
   micWs.binaryType = 'arraybuffer';
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   audioCtx     = new AudioCtx({ sampleRate: 16000 });
