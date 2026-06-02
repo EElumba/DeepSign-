@@ -51,7 +51,9 @@ A single-page HTML/JS app. No framework, no build step. The UI has:
 3. Hand landmarks are drawn mirrored (selfie orientation) on a canvas
 4. A **velocity-based segmentation** algorithm watches wrist movement:
    - Wrist velocity > 0.012 (normalized) = "signing active"
+   - 6 pre-roll frames are included so the setup handshape is not lost
    - After 20 consecutive still frames → sign is complete, buffer is flushed
+   - Final still frames are kept so end holds remain part of the sign
    - Buffer is force-flushed after 120 frames (~4 seconds)
 5. The buffered frames (each as `{left_hand, right_hand}` 21×3 arrays) are POSTed to `/api/recognize`
 6. If confidence ≥ 0.45, the recognized gloss word is appended to a running list
@@ -156,12 +158,14 @@ After the CLI generates a pose, a **postprocessing pipeline** runs:
 
 #### `POST /recognize`
 - Accepts `{"frames": [{left_hand: [[x,y,z]×21]|null, right_hand: ...}, ...]}`
-- Extracts a **126-dimensional feature vector** per frame:
+- Extracts a **126-dimensional hand-shape feature vector** per frame:
   - Normalizes each hand by centering at wrist (landmark 0) and dividing by max finger distance
   - Concatenates left hand (63 dims) + right hand (63 dims)
-- Averages across all frames, L2-normalizes the result
-- Computes cosine similarity against every sign in the loaded lexicon
-- Returns `{"gloss": "word", "confidence": 0.xx}`
+- Builds a compact temporal template by resampling the sign to 24 frames
+- Adds normalized left/right wrist trajectory and hand visibility signals
+- Runs a fast cosine-similarity pass against all lexicon means to shortlist candidates
+- Reranks the top candidates with banded DTW over the temporal templates
+- Returns `{"gloss": "word", "confidence": 0.xx, "mean_confidence": 0.xx, "temporal_confidence": 0.xx}`
 
 #### `GET /health`
 - Returns `{"status": "ok"}`
@@ -171,10 +175,13 @@ After the CLI generates a pose, a **postprocessing pipeline** runs:
 At startup, the server reads every `.pose` file listed in `lexicon_wlasl/index.csv`. For each:
 1. Reads the `.pose` binary using the `pose_format` library
 2. Extracts `LEFT_HAND_LANDMARKS` and `RIGHT_HAND_LANDMARKS` components
-3. Computes a mean 126-dim feature vector across all frames with hand confidence > 0.1
-4. L2-normalizes and stores as a reference vector keyed by gloss
+3. Skips frames where no hand is visible above the confidence threshold
+4. Computes a mean 126-dim hand-shape vector for coarse retrieval
+5. Computes a fixed-length temporal template with wrist trajectory for reranking
+6. Stores both references keyed by gloss
 
-This gives O(N) recognition at inference (dot product against all N signs).
+This keeps inference practical: O(N) dot products for the coarse pass, then
+temporal matching only for the top-K candidates.
 
 ### Lexicon Resolution Priority
 
@@ -270,9 +277,9 @@ Microphone (browser)
 Webcam (browser)
   → MediaPipe Hands (client-side, CDN)
   → 21 hand landmarks per frame (x,y,z normalized)
-  → Velocity-based segmentation (wrist movement threshold)
+  → Velocity-based segmentation + pre-roll/final-hold capture
   → POST /api/recognize → Python /recognize
-  → Cosine similarity vs. WLASL lexicon feature vectors
+  → Cosine shortlist + temporal template rerank vs. WLASL lexicon
   → Recognized gloss word
   → Accumulate glosses until 2.5s idle
   → POST /api/gloss-to-english → OpenAI (ASL gloss → English)

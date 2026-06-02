@@ -295,14 +295,16 @@ const signResetBtn  = document.getElementById('signResetBtn');
 const MIN_SIGN_FRAMES    = 10;    // ignore gestures shorter than this many frames
 const MAX_SIGN_FRAMES    = 120;   // force-flush after ~4 s at 30 fps
 const REST_FRAMES        = 20;    // still frames before treating sign as complete
+const SIGN_PREROLL_FRAMES = 6;    // include setup handshape before movement starts
 const VELOCITY_THRESHOLD = 0.012; // normalized wrist movement to count as "active"
-const CONFIDENCE_MIN     = 0.45;  // recognition cosine similarity gate
+const CONFIDENCE_MIN     = 0.45;  // recognition confidence gate
 const GLOSS_IDLE_MS      = 2500;  // silence after last gloss → translate + speak
 
 let holistic        = null;
 let signStream      = null;
 let signRunning     = false;
 let signFrameBuffer = [];
+let signPreRollFrames = [];
 let signGlosses     = [];
 let signActive      = false;
 let signRestCount   = 0;
@@ -431,16 +433,26 @@ function processSignFrame(results) {
 
   const handsVisible = currentWrists.length > 0;
   const isActive     = handsVisible && velocity > VELOCITY_THRESHOLD;
+  const framePayload = { left_hand: leftHand, right_hand: rightHand };
 
   if (isActive) {
-    if (!signActive) setSignStatus('Signing…');
+    if (!signActive) {
+      setSignStatus('Signing…');
+      signFrameBuffer = signPreRollFrames.slice();
+    }
     signActive    = true;
     signRestCount = 0;
-    signFrameBuffer.push({ left_hand: leftHand, right_hand: rightHand });
+    signFrameBuffer.push(framePayload);
     if (signFrameBuffer.length >= MAX_SIGN_FRAMES) flushSignBuffer();
   } else if (signActive) {
     signRestCount++;
+    if (handsVisible) signFrameBuffer.push(framePayload);
     if (signRestCount >= REST_FRAMES) flushSignBuffer();
+  } else if (handsVisible) {
+    signPreRollFrames.push(framePayload);
+    while (signPreRollFrames.length > SIGN_PREROLL_FRAMES) signPreRollFrames.shift();
+  } else {
+    signPreRollFrames = [];
   }
 }
 
@@ -450,6 +462,7 @@ async function flushSignBuffer() {
   const frames  = signFrameBuffer.splice(0);
   signActive    = false;
   signRestCount = 0;
+  signPreRollFrames = [];
 
   if (frames.length < MIN_SIGN_FRAMES || recognizing) {
     setSignStatus('Watching… sign a word!');
@@ -541,6 +554,7 @@ signResetBtn.addEventListener('click', () => {
   if (glossTimer) { clearTimeout(glossTimer); glossTimer = null; }
   signGlosses     = [];
   signFrameBuffer = [];
+  signPreRollFrames = [];
   signActive      = false;
   signRestCount   = 0;
   prevWrists      = [];

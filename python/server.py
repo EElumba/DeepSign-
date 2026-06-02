@@ -36,6 +36,14 @@ STABILIZE_BODY_SIZE = os.environ.get("STABILIZE_BODY_SIZE", "1").lower() not in 
 AVATAR_Y_OFFSET = float(os.environ.get("AVATAR_Y_OFFSET", "-45"))
 POSE_CACHE_SIZE = max(0, int(os.environ.get("POSE_CACHE_SIZE", "128")))
 POSE_GENERATION_TIMEOUT = float(os.environ.get("POSE_GENERATION_TIMEOUT", "30"))
+RECOGNIZE_SEQUENCE_LENGTH = max(8, int(os.environ.get("RECOGNIZE_SEQUENCE_LENGTH", "24")))
+RECOGNIZE_TOP_K = max(1, int(os.environ.get("RECOGNIZE_TOP_K", "48")))
+RECOGNIZE_TEMPORAL_WEIGHT = float(os.environ.get("RECOGNIZE_TEMPORAL_WEIGHT", "0.65"))
+RECOGNIZE_TEMPORAL_WEIGHT = min(1.0, max(0.0, RECOGNIZE_TEMPORAL_WEIGHT))
+RECOGNIZE_DTW_BAND = max(1, int(os.environ.get("RECOGNIZE_DTW_BAND", "6")))
+HAND_CONFIDENCE_MIN = float(os.environ.get("HAND_CONFIDENCE_MIN", "0.1"))
+TRAJECTORY_FEATURE_WEIGHT = float(os.environ.get("TRAJECTORY_FEATURE_WEIGHT", "2.5"))
+VISIBILITY_FEATURE_WEIGHT = float(os.environ.get("VISIBILITY_FEATURE_WEIGHT", "0.25"))
 
 # Replace MediaPipe Holistic's dense 478-point face mesh (the "Google" tessellation,
 # ~2500 connections) with a clean ~14-point cartoon face: outline, eyes, nose, and
@@ -63,7 +71,7 @@ _pose_cache: OrderedDict[str, bytes] = OrderedDict()
 _pose_cache_lock = Lock()
 
 # --- Sign recognition lexicon (loaded at startup) ---
-_lexicon_features: dict = {}   # gloss -> np.ndarray (126,) mean feature vector
+_lexicon_features: dict = {}   # gloss -> {"mean": np.ndarray, "sequence": np.ndarray}
 _lexicon_features_lock = Lock()
 
 
@@ -187,7 +195,7 @@ def _normalize_hand(lm: Optional[np.ndarray]) -> np.ndarray:
     comparable regardless of absolute coordinate system.
     """
     zeros = np.zeros((21, 3), dtype=np.float32)
-    if lm is None or lm.shape != (21, 3):
+    if lm is None or lm.shape != (21, 3) or not np.isfinite(lm).all():
         return zeros
     lm = lm.astype(np.float32)
     lm -= lm[0]  # center at wrist (index 0)
@@ -202,31 +210,174 @@ def _frame_feature(lh: Optional[np.ndarray], rh: Optional[np.ndarray]) -> np.nda
     return np.concatenate([_normalize_hand(lh).flatten(), _normalize_hand(rh).flatten()])
 
 
-def _pose_to_mean_feature(pose) -> Optional[np.ndarray]:
-    """Extract a single mean (126,) feature vector from a pose_format Pose."""
+def _valid_hand(lm: Optional[np.ndarray]) -> bool:
+    return lm is not None and lm.shape == (21, 3) and np.isfinite(lm).all()
+
+
+def _hand_scale(lm: np.ndarray) -> float:
+    centered = lm.astype(np.float32) - lm[0]
+    return float(np.linalg.norm(centered, axis=1).max())
+
+
+def _normalize_rows(sequence: np.ndarray) -> np.ndarray:
+    sequence = np.nan_to_num(sequence.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    norms = np.linalg.norm(sequence, axis=1, keepdims=True)
+    normalized = np.divide(
+        sequence,
+        norms,
+        out=np.zeros_like(sequence, dtype=np.float32),
+        where=norms > 1e-6,
+    ).astype(np.float32)
+    return np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _resample_sequence(sequence: np.ndarray, length: int) -> np.ndarray:
+    """Linearly resample a variable-length sign to a fixed temporal template."""
+    if sequence.shape[0] == length:
+        return sequence.astype(np.float32)
+    if sequence.shape[0] == 1:
+        return np.repeat(sequence, length, axis=0).astype(np.float32)
+
+    old_x = np.linspace(0.0, 1.0, sequence.shape[0], dtype=np.float32)
+    new_x = np.linspace(0.0, 1.0, length, dtype=np.float32)
+    out = np.empty((length, sequence.shape[1]), dtype=np.float32)
+    for dim in range(sequence.shape[1]):
+        out[:, dim] = np.interp(new_x, old_x, sequence[:, dim])
+    return out
+
+
+def _relative_wrist_path(wrists: np.ndarray, visible: np.ndarray, scale: float) -> np.ndarray:
+    path = np.zeros((len(wrists), 2), dtype=np.float32)
+    if not visible.any():
+        return path
+    origin = wrists[np.flatnonzero(visible)[0]]
+    path[visible] = (wrists[visible] - origin) / scale
+    return np.clip(path, -4.0, 4.0)
+
+
+def _hand_frames_to_features(hand_frames: list) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Return a mean hand-shape vector plus a fixed-length temporal template.
+
+    The mean vector keeps the current fast shortlist behavior. The sequence
+    template preserves order and wrist motion so signs with similar average
+    handshape can still separate during reranking.
+    """
+    shape_feats = []
+    left_wrists = []
+    right_wrists = []
+    visibility = []
+    scales = []
+
+    for lh, rh in hand_frames:
+        lh_valid = _valid_hand(lh)
+        rh_valid = _valid_hand(rh)
+        if not lh_valid and not rh_valid:
+            continue
+
+        shape_feats.append(_frame_feature(lh if lh_valid else None, rh if rh_valid else None))
+        left_wrists.append(lh[0, :2] if lh_valid else [np.nan, np.nan])
+        right_wrists.append(rh[0, :2] if rh_valid else [np.nan, np.nan])
+        visibility.append([1.0 if lh_valid else 0.0, 1.0 if rh_valid else 0.0])
+        if lh_valid:
+            scales.append(_hand_scale(lh))
+        if rh_valid:
+            scales.append(_hand_scale(rh))
+
+    if not shape_feats:
+        return None, None
+
+    shape = np.stack(shape_feats).astype(np.float32)
+    mean = shape.mean(axis=0)
+    mean_norm = np.linalg.norm(mean)
+    if mean_norm < 1e-6:
+        return None, None
+    mean = (mean / mean_norm).astype(np.float32)
+
+    scale = float(np.median([s for s in scales if s > 1e-6])) if scales else 1.0
+    if scale <= 1e-6 or not np.isfinite(scale):
+        scale = 1.0
+
+    left_wrists = np.array(left_wrists, dtype=np.float32)
+    right_wrists = np.array(right_wrists, dtype=np.float32)
+    visibility = np.array(visibility, dtype=np.float32)
+    left_visible = visibility[:, 0] > 0
+    right_visible = visibility[:, 1] > 0
+    left_path = _relative_wrist_path(left_wrists, left_visible, scale)
+    right_path = _relative_wrist_path(right_wrists, right_visible, scale)
+
+    sequence = np.concatenate(
+        [
+            shape,
+            np.concatenate([left_path, right_path], axis=1) * TRAJECTORY_FEATURE_WEIGHT,
+            visibility * VISIBILITY_FEATURE_WEIGHT,
+        ],
+        axis=1,
+    ).astype(np.float32)
+    sequence = np.nan_to_num(sequence, nan=0.0, posinf=0.0, neginf=0.0)
+    sequence = _resample_sequence(sequence, RECOGNIZE_SEQUENCE_LENGTH)
+    sequence = _normalize_rows(sequence)
+    return mean, sequence
+
+
+def _pose_to_reference_features(pose) -> Optional[dict]:
+    """Extract coarse and temporal recognition features from a pose_format Pose."""
     lh_sl = _component_slice(pose, "LEFT_HAND_LANDMARKS")
     rh_sl = _component_slice(pose, "RIGHT_HAND_LANDMARKS")
     if lh_sl is None and rh_sl is None:
         return None
 
-    feats = []
+    hand_frames = []
     for f in range(pose.body.data.shape[0]):
         lh_data = rh_data = None
-        if lh_sl is not None and pose.body.confidence[f, 0, lh_sl].mean() > 0.1:
+        if lh_sl is not None and pose.body.confidence[f, 0, lh_sl].mean() > HAND_CONFIDENCE_MIN:
             lh_data = pose.body.data[f, 0, lh_sl, :3]
-        if rh_sl is not None and pose.body.confidence[f, 0, rh_sl].mean() > 0.1:
+        if rh_sl is not None and pose.body.confidence[f, 0, rh_sl].mean() > HAND_CONFIDENCE_MIN:
             rh_data = pose.body.data[f, 0, rh_sl, :3]
-        feats.append(_frame_feature(lh_data, rh_data))
+        hand_frames.append((lh_data, rh_data))
 
-    if not feats:
+    mean, sequence = _hand_frames_to_features(hand_frames)
+    if mean is None or sequence is None:
         return None
-    mean = np.stack(feats).mean(axis=0)
-    norm = np.linalg.norm(mean)
-    return (mean / norm).astype(np.float32) if norm > 1e-6 else None
+    return {"mean": mean, "sequence": sequence}
+
+
+def _temporal_similarity(query: np.ndarray, reference: np.ndarray) -> float:
+    """Banded DTW over normalized frame descriptors, returned as average cosine."""
+    if query is None or reference is None or not len(query) or not len(reference):
+        return -1.0
+
+    query = np.clip(_normalize_rows(query), -1.0, 1.0)
+    reference = np.clip(_normalize_rows(reference), -1.0, 1.0)
+    n, m = query.shape[0], reference.shape[0]
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        similarity = np.clip(query @ reference.T, -1.0, 1.0)
+    similarity = np.nan_to_num(similarity, nan=-1.0, posinf=1.0, neginf=-1.0)
+    cost = 1.0 - similarity
+    dp = np.full((n + 1, m + 1), np.inf, dtype=np.float32)
+    steps = np.zeros((n + 1, m + 1), dtype=np.int16)
+    dp[0, 0] = 0.0
+
+    for i in range(1, n + 1):
+        j_start = max(1, i - RECOGNIZE_DTW_BAND)
+        j_end = min(m, i + RECOGNIZE_DTW_BAND) + 1
+        for j in range(j_start, j_end):
+            candidates = (
+                (dp[i - 1, j], steps[i - 1, j]),
+                (dp[i, j - 1], steps[i, j - 1]),
+                (dp[i - 1, j - 1], steps[i - 1, j - 1]),
+            )
+            prev_cost, prev_steps = min(candidates, key=lambda item: item[0])
+            dp[i, j] = cost[i - 1, j - 1] + prev_cost
+            steps[i, j] = prev_steps + 1
+
+    if not np.isfinite(dp[n, m]) or steps[n, m] <= 0:
+        return float(np.mean(np.sum(query * reference, axis=1)))
+    avg_cost = float(dp[n, m] / steps[n, m])
+    return float(np.clip(1.0 - avg_cost, -1.0, 1.0))
 
 
 def _load_lexicon_features() -> None:
-    """Read every .pose file in the lexicon and cache its mean feature vector."""
+    """Read every .pose file in the lexicon and cache hybrid recognizer features."""
     try:
         from pose_format import Pose as _Pose
     except ImportError:
@@ -252,9 +403,9 @@ def _load_lexicon_features() -> None:
         try:
             with open(abs_path, "rb") as pf:
                 pose = _Pose.read(pf.read())
-            feat = _pose_to_mean_feature(pose)
-            if feat is not None:
-                new_features[gloss] = feat
+            features = _pose_to_reference_features(pose)
+            if features is not None:
+                new_features[gloss] = features
                 loaded += 1
             else:
                 failed += 1
@@ -265,7 +416,11 @@ def _load_lexicon_features() -> None:
     with _lexicon_features_lock:
         _lexicon_features.update(new_features)
 
-    print(f"[Recognize] {loaded} sign feature(s) loaded, {failed} skipped.")
+    print(
+        f"[Recognize] {loaded} temporal sign feature(s) loaded, {failed} skipped "
+        f"(top_k={RECOGNIZE_TOP_K}, sequence={RECOGNIZE_SEQUENCE_LENGTH}, "
+        f"temporal_weight={RECOGNIZE_TEMPORAL_WEIGHT:.2f})."
+    )
 
 
 def generate_pose(text: str, retries: int = 2) -> bytes:
@@ -614,7 +769,7 @@ def recognize_sign(req: RecognizeRequest):
     if not req.frames:
         raise HTTPException(status_code=400, detail="No frames provided")
 
-    feats = []
+    hand_frames = []
     for frame in req.frames:
         if not isinstance(frame, dict):
             continue
@@ -622,25 +777,50 @@ def recognize_sign(req: RecognizeRequest):
         rh = frame.get("right_hand")
         lh_arr = np.array(lh, dtype=np.float32) if (lh and len(lh) == 21) else None
         rh_arr = np.array(rh, dtype=np.float32) if (rh and len(rh) == 21) else None
-        feats.append(_frame_feature(lh_arr, rh_arr))
+        hand_frames.append((lh_arr, rh_arr))
 
-    if not feats:
+    query_mean, query_sequence = _hand_frames_to_features(hand_frames)
+    if query_mean is None or query_sequence is None:
         return {"gloss": "", "confidence": 0.0}
 
-    query_mean = np.stack(feats).mean(axis=0)
-    norm = np.linalg.norm(query_mean)
-    if norm < 1e-6:
-        return {"gloss": "", "confidence": 0.0}
-    query_mean = (query_mean / norm).astype(np.float32)
-
-    best_gloss, best_score = "", -1.0
+    candidates = []
     with _lexicon_features_lock:
         for gloss, ref in _lexicon_features.items():
-            score = float(np.dot(query_mean, ref))
-            if score > best_score:
-                best_score, best_gloss = score, gloss
+            mean_score = float(np.dot(query_mean, ref["mean"]))
+            candidates.append((mean_score, gloss, ref))
 
-    return {"gloss": best_gloss, "confidence": round(best_score, 4)}
+    if not candidates:
+        return {"gloss": "", "confidence": 0.0}
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    best = {
+        "gloss": "",
+        "score": -1.0,
+        "mean_score": -1.0,
+        "temporal_score": -1.0,
+    }
+
+    for mean_score, gloss, ref in candidates[:RECOGNIZE_TOP_K]:
+        temporal_score = _temporal_similarity(query_sequence, ref["sequence"])
+        combined_score = (
+            (1.0 - RECOGNIZE_TEMPORAL_WEIGHT) * mean_score
+            + RECOGNIZE_TEMPORAL_WEIGHT * temporal_score
+        )
+        if combined_score > best["score"]:
+            best = {
+                "gloss": gloss,
+                "score": combined_score,
+                "mean_score": mean_score,
+                "temporal_score": temporal_score,
+            }
+
+    return {
+        "gloss": best["gloss"],
+        "confidence": round(float(best["score"]), 4),
+        "mean_confidence": round(float(best["mean_score"]), 4),
+        "temporal_confidence": round(float(best["temporal_score"]), 4),
+        "candidates_considered": min(RECOGNIZE_TOP_K, len(candidates)),
+    }
 
 
 @app.post("/pose")
