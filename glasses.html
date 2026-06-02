@@ -68,12 +68,12 @@
 </head>
 <body>
   <div class="wrap">
-    <div id="bar"><span id="dot"></span><span id="status-text">Connecting</span></div>
-    <div id="transcript"></div>
-    <pose-viewer id="signer" autoplay></pose-viewer>
+    <div id="bar" role="status" aria-live="polite"><span id="dot" aria-hidden="true"></span><span id="status-text">Connecting</span></div>
+    <div id="transcript" role="log" aria-live="polite" aria-label="Speech transcript"></div>
+    <pose-viewer id="signer" autoplay role="img" aria-label="Animated signing avatar"></pose-viewer>
     <div class="controls">
-      <button id="micBtn" class="focusable" type="button" autofocus>Start</button>
-      <button id="resetBtn" class="focusable" type="button">Reset</button>
+      <button id="micBtn" class="focusable" type="button" autofocus aria-label="Start or stop microphone">Start</button>
+      <button id="resetBtn" class="focusable" type="button" aria-label="Reset signing playback">Reset</button>
     </div>
   </div>
 
@@ -199,6 +199,10 @@
             transcriptEl.textContent = msg.text;
           } else if (msg.type === 'reset') {
             resetSigning(false);
+          } else if (msg.type === 'error') {
+            const text = msg.text || msg.error || 'Service unavailable.';
+            setStatus('error', 'Service issue');
+            transcriptEl.textContent = text;
           }
         }
       };
@@ -227,6 +231,28 @@
 
       micWs = new WebSocket(wsUrl('audio'));
       micWs.binaryType = 'arraybuffer';
+      const activeMicWs = micWs;
+      micWs.onopen = () => setStatus('live', 'Listening');
+      micWs.onmessage = (event) => {
+        let msg; try { msg = JSON.parse(event.data); } catch (e) { return; }
+        if (msg.type === 'error') {
+          const text = msg.text || msg.error || 'Speech unavailable.';
+          setStatus('error', 'No speech');
+          transcriptEl.textContent = text;
+        }
+      };
+      micWs.onclose = (event) => {
+        if (micWs !== activeMicWs || !recording) return;
+        const text = event.reason || 'Speech connection closed.';
+        stopMic();
+        setStatus('error', 'No speech');
+        transcriptEl.textContent = text;
+      };
+      micWs.onerror = () => setStatus('error', 'Speech error');
+
+      recording = true;
+      micBtn.textContent = 'Stop';
+      micBtn.classList.add('recording');
 
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       audioContext = new AudioCtx({ sampleRate: 16000 });
@@ -246,11 +272,6 @@
 
       source.connect(processor);
       processor.connect(audioContext.destination);
-
-      recording = true;
-      micBtn.textContent = 'Stop';
-      micBtn.classList.add('recording');
-      setStatus('live', 'Listening');
     }
 
     function stopMic() {

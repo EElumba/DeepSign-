@@ -50,8 +50,13 @@ folder containing `index.csv`) to override.
 
 ```bash
 cp .env.example .env
-# Add your Deepgram API key to .env
+# Add your Deepgram API key to enable Speak→Sign microphone capture
 ```
+
+The Node server can start in limited mode when optional services are missing.
+Visit `/api/health` to see which services are configured and whether the Python
+pose server is reachable. Speak→Sign requires `DEEPGRAM_API_KEY`; OpenAI glossing
+and ElevenLabs speech output fall back gracefully when unset.
 
 ## Run — two terminals required
 

@@ -13,8 +13,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 if (!DEEPGRAM_API_KEY) {
-  console.error('Missing DEEPGRAM_API_KEY. Copy .env.example to .env and fill it in.');
-  process.exit(1);
+  console.warn('[Speech] DEEPGRAM_API_KEY not set — Speak→Sign audio capture will be unavailable.');
 }
 
 // Strip trailing slashes so `${POSE_SERVER_URL}/pose` never becomes `//pose`
@@ -25,7 +24,7 @@ const POSE_TIMEOUT_MS = Number(process.env.POSE_TIMEOUT_MS || 30000);
 const ROOM_IDLE_TTL_MS = Number(process.env.ROOM_IDLE_TTL_MS || 60000);
 const ROOM_ID_PATTERN = /^[a-zA-Z0-9_-]{6,80}$/;
 
-const deepgram = createClient(DEEPGRAM_API_KEY);
+const deepgram = DEEPGRAM_API_KEY ? createClient(DEEPGRAM_API_KEY) : null;
 
 // --- English -> ASL gloss via OpenAI -------------------------------------- //
 // Small/fast model keeps latency low. If no key is set, we sign the raw
@@ -121,6 +120,10 @@ async function englishToAslGloss(text) {
 const app = express();
 app.use(express.json({ limit: '5mb' }));
 
+// Room-local state. A room represents one private conversation. All transcripts,
+// pose blobs, and control messages stay inside its display client set.
+const rooms = new Map();
+
 function createRoomId() {
   return randomUUID().replace(/-/g, '');
 }
@@ -166,6 +169,51 @@ app.get('/api/sessions/new', (req, res) => {
     glassesUrl: roomPath('/glasses', roomId),
     audioWsPath: `/ws/audio/${roomId}`,
     displayWsPath: `/ws/display/${roomId}`,
+  });
+});
+
+async function probePoseServer() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1200);
+  try {
+    const response = await fetch(`${POSE_SERVER_URL}/health`, { signal: controller.signal });
+    return {
+      configured: true,
+      reachable: response.ok,
+      status: response.ok ? 'ok' : `http_${response.status}`,
+    };
+  } catch (err) {
+    return {
+      configured: true,
+      reachable: false,
+      status: err.name === 'AbortError' ? 'timeout' : 'unreachable',
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+app.get('/api/health', async (req, res) => {
+  res.json({
+    status: 'ok',
+    services: {
+      deepgram: {
+        configured: Boolean(DEEPGRAM_API_KEY),
+        status: DEEPGRAM_API_KEY ? 'configured' : 'missing_key',
+      },
+      openai: {
+        configured: Boolean(OPENAI_API_KEY),
+        status: OPENAI_API_KEY ? 'configured' : 'fallback_raw_text',
+      },
+      tts: {
+        configured: Boolean(ELEVENLABS_API_KEY),
+        status: ELEVENLABS_API_KEY ? 'configured' : 'visual_only',
+      },
+      pose: await probePoseServer(),
+    },
+    rooms: {
+      active: rooms.size,
+    },
   });
 });
 
@@ -271,10 +319,6 @@ app.post('/api/tts', async (req, res) => {
 
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
-
-// Room-local state. A room represents one private conversation. All transcripts,
-// pose blobs, and control messages stay inside its display client set.
-const rooms = new Map();
 
 function getRoom(roomId) {
   let room = rooms.get(roomId);
@@ -388,6 +432,15 @@ function broadcastToRoom(room, data) {
   }
 }
 
+function broadcastError(room, message, scope = 'service') {
+  broadcastToRoom(room, JSON.stringify({
+    type: 'error',
+    roomId: room.id,
+    scope,
+    text: message,
+  }));
+}
+
 function resetRoomPlayback(room) {
   room.poseGeneration += 1;
   for (const session of room.audioSessions) session.reset();
@@ -424,6 +477,13 @@ wss.on('connection', (ws, request) => {
   }
 
   console.log(`[Room ${room.id}] Audio client connected — opening Deepgram live session.`);
+  if (!deepgram) {
+    const message = 'Speech recognition is not configured. Set DEEPGRAM_API_KEY to use Speak to Sign.';
+    broadcastError(room, message, 'speech');
+    rejectWebSocket(ws, message);
+    releaseRoom(room);
+    return;
+  }
 
   // Sentence-level batching: ASL gloss reordering needs a whole clause, so we
   // accumulate finalized words and flush a full utterance at a time — on
@@ -457,6 +517,8 @@ wss.on('connection', (ws, request) => {
         const arrayBuffer = await generatePose(gloss);
         if (arrayBuffer && generation === room.poseGeneration) {
           broadcastToRoom(room, Buffer.from(arrayBuffer));
+        } else if (generation === room.poseGeneration) {
+          broadcastError(room, 'Signing service is unavailable. Make sure the Python pose server is running.', 'pose');
         }
       })
       .catch((err) => console.error('[Pose] generation error:', err));
@@ -525,6 +587,7 @@ wss.on('connection', (ws, request) => {
 
     dgLive.on(LiveTranscriptionEvents.Error, (err) => {
       console.error('Deepgram error:', err);
+      broadcastError(room, 'Speech recognition error. Check Deepgram credentials and network access.', 'speech');
     });
 
     dgLive.on(LiveTranscriptionEvents.Close, () => {
@@ -532,6 +595,15 @@ wss.on('connection', (ws, request) => {
     });
   } catch (err) {
     console.error('Failed to open Deepgram live session:', err);
+  }
+
+  if (!dgLive) {
+    const message = 'Could not open the speech recognition connection.';
+    broadcastError(room, message, 'speech');
+    room.audioSessions.delete(session);
+    rejectWebSocket(ws, message);
+    releaseRoom(room);
+    return;
   }
 
   ws.on('message', (chunk) => {

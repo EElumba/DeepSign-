@@ -15,15 +15,21 @@
 
   <style>
     * { box-sizing: border-box; }
+    html { width: 100%; overflow-x: hidden; }
     body {
       margin: 0; padding: 0;
       background: #000; color: #fff;
       font-family: monospace;
+      line-height: 1.35;
       min-height: 100vh;
-      display: flex; flex-direction: column; align-items: center;
+      width: 100%;
+      overflow-x: hidden;
+      display: flex; flex-direction: column; align-items: stretch;
     }
     .wrap {
-      width: 100%; max-width: 504px; padding: 12px;
+      width: min(100%, 560px); max-width: 100vw; padding: 12px;
+      min-width: 0;
+      margin: 0 auto;
       display: flex; flex-direction: column; gap: 10px;
     }
 
@@ -32,12 +38,54 @@
     #dot.live  { background: #2ecc71; }
     #dot.error { background: #e74c3c; }
 
-    #mode-bar { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    #mode-bar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; min-width: 0; }
     .mode-btn {
       padding: 9px 4px; font-size: 12px; font-weight: 700; font-family: monospace;
       color: #888; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; cursor: pointer;
+      min-width: 0; overflow-wrap: anywhere;
     }
     .mode-btn.active { color: #fff; background: #2471a3; border-color: #2471a3; }
+
+    .trust-strip, .service-notice, .pairing-row {
+      border: 1px solid #2a2a2a;
+      background: rgba(255,255,255,0.06);
+      border-radius: 6px;
+    }
+    .trust-strip {
+      padding: 7px 8px;
+      font-size: 12px;
+      color: #ddd;
+      overflow-wrap: anywhere;
+    }
+    .service-notice {
+      display: none;
+      padding: 7px 8px;
+      font-size: 12px;
+      color: #ffe14d;
+      border-color: rgba(255,225,77,0.35);
+      background: rgba(255,225,77,0.08);
+      overflow-wrap: anywhere;
+    }
+    .service-notice.visible { display: block; }
+    .pairing-row {
+      display: grid;
+      grid-template-columns: 1fr;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px;
+      font-size: 12px;
+    }
+    .room-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cfcfcf; }
+    .room-meta code { color: #fff; }
+    .secondary-btn {
+      padding: 8px 10px;
+      font-size: 12px;
+      background: #333;
+      border: 1px solid #555;
+      border-radius: 6px;
+      color: #fff;
+      width: 100%;
+    }
 
     .info-line {
       font-size: 13px; line-height: 1.4; min-height: 2.5em; max-height: 2.5em;
@@ -69,54 +117,70 @@
 
     #sign-status { font-size: 11px; color: #777; }
 
-    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    section { min-width: 0; max-width: 100%; }
+    .controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; min-width: 0; }
     button {
       padding: 12px; font-size: 14px; font-weight: 600; font-family: monospace;
       color: #fff; border: none; border-radius: 8px; cursor: pointer;
+      min-width: 0; white-space: normal; overflow-wrap: anywhere;
     }
     #micBtn    { background: #2ecc71; }
     #cameraBtn { background: #2ecc71; }
     #micBtn.recording, #cameraBtn.recording { background: #e74c3c; }
     #resetBtn, #signResetBtn { background: #555; }
     button:disabled { opacity: 0.45; cursor: default; }
+    button:focus-visible {
+      outline: 3px solid #ffe14d;
+      outline-offset: 2px;
+    }
   </style>
 </head>
 <body>
-<div class="wrap">
+<main class="wrap">
 
-  <div id="bar"><span id="dot"></span><span id="status-text">Connecting</span></div>
+  <div id="bar" role="status" aria-live="polite">
+    <span id="dot" aria-hidden="true"></span><span id="status-text">Connecting</span>
+  </div>
 
-  <div id="mode-bar">
-    <button id="speakModeBtn" class="mode-btn active">Speak to Sign</button>
-    <button id="signModeBtn"  class="mode-btn">Sign to Speak</button>
+  <div class="trust-strip">Private room · Live audio/camera only · AI-assisted, not certified interpretation</div>
+  <div id="serviceNotice" class="service-notice" role="status" aria-live="polite"></div>
+
+  <div class="pairing-row">
+    <div class="room-meta">Room <code id="roomLabel"></code> · pair glasses with this session</div>
+    <button id="copyGlassesBtn" class="secondary-btn" type="button">Copy glasses link</button>
+  </div>
+
+  <div id="mode-bar" role="tablist" aria-label="Translation mode">
+    <button id="speakModeBtn" class="mode-btn active" type="button" role="tab" aria-selected="true" aria-controls="speak-panel">Speak to Sign</button>
+    <button id="signModeBtn" class="mode-btn" type="button" role="tab" aria-selected="false" aria-controls="sign-panel">Sign to Speak</button>
   </div>
 
   <!-- SPEAK to SIGN panel -->
-  <div id="speak-panel" style="display:flex; flex-direction:column; gap:10px;">
-    <div id="transcript" class="info-line"></div>
-    <pose-viewer id="signer" autoplay></pose-viewer>
+  <section id="speak-panel" role="tabpanel" aria-labelledby="speakModeBtn" style="display:flex; flex-direction:column; gap:10px;">
+    <div id="transcript" class="info-line" role="log" aria-live="polite" aria-label="Speech transcript"></div>
+    <pose-viewer id="signer" autoplay role="img" aria-label="Animated signing avatar"></pose-viewer>
     <div class="controls">
-      <button id="micBtn">Start</button>
+      <button id="micBtn" type="button">Start</button>
       <button id="resetBtn" type="button">Reset</button>
     </div>
-  </div>
+  </section>
 
   <!-- SIGN to SPEAK panel -->
-  <div id="sign-panel" style="display:none; flex-direction:column; gap:10px;">
-    <div id="sign-status">Start camera then sign a word.</div>
-    <canvas id="signCanvas" width="640" height="480"></canvas>
-    <div id="gloss-display" class="info-line" title="Recognized gloss words"></div>
-    <div id="english-output"></div>
+  <section id="sign-panel" role="tabpanel" aria-labelledby="signModeBtn" hidden style="display:none; flex-direction:column; gap:10px;">
+    <div id="sign-status" role="status" aria-live="polite">Start camera then sign a word.</div>
+    <canvas id="signCanvas" width="640" height="480" role="img" aria-label="Camera preview with detected hand landmarks"></canvas>
+    <div id="gloss-display" class="info-line" role="log" aria-live="polite" aria-label="Recognized ASL gloss words" title="Recognized gloss words"></div>
+    <div id="english-output" role="status" aria-live="polite" aria-label="Spoken English output"></div>
     <div class="controls">
-      <button id="cameraBtn">Start Camera</button>
+      <button id="cameraBtn" type="button">Start Camera</button>
       <button id="signResetBtn" type="button">Reset</button>
     </div>
-  </div>
+  </section>
 
-</div>
+</main>
 
 <!-- Hidden video element that feeds MediaPipe frames -->
-<video id="signVideo" playsinline
+<video id="signVideo" playsinline aria-hidden="true"
        style="display:none; position:fixed; left:-9999px; top:0; width:1px; height:1px;"></video>
 
 <script>
@@ -132,10 +196,34 @@ if (!ROOM_ID_PATTERN.test(roomId)) {
 
 const dot        = document.getElementById('dot');
 const statusText = document.getElementById('status-text');
+const serviceNotice = document.getElementById('serviceNotice');
+const roomLabel = document.getElementById('roomLabel');
+const copyGlassesBtn = document.getElementById('copyGlassesBtn');
+const glassesUrl = `${location.origin}/glasses?room=${encodeURIComponent(roomId)}`;
+
+roomLabel.textContent = roomId.slice(0, 8);
+
+copyGlassesBtn.addEventListener('click', async () => {
+  const original = copyGlassesBtn.textContent;
+  try {
+    await navigator.clipboard.writeText(glassesUrl);
+    copyGlassesBtn.textContent = 'Copied';
+  } catch (e) {
+    copyGlassesBtn.textContent = 'Copy failed';
+  } finally {
+    setTimeout(() => { copyGlassesBtn.textContent = original; }, 1600);
+  }
+});
 
 function setStatus(state, text) {
   dot.className = state === 'live' ? 'live' : state === 'error' ? 'error' : '';
   statusText.textContent = text;
+}
+
+function setServiceNotice(messages) {
+  const text = messages.filter(Boolean).join(' ');
+  serviceNotice.textContent = text;
+  serviceNotice.classList.toggle('visible', Boolean(text));
 }
 
 function wsUrl(role) {
@@ -204,14 +292,7 @@ function resetSigning(notifyServer = true) {
 
 signer.addEventListener('ended$', () => playNext());
 
-// Use wss:// when the page is served over HTTPS, otherwise browsers block the
-// insecure ws:// connection as mixed content.
-displayWS = new WebSocket(wsUrl('display'));
-displayWS.binaryType = 'arraybuffer';
-displayWS.onopen  = () => setStatus('live', `Live · ${roomId.slice(0, 6)}`);
-displayWS.onclose = () => setStatus('error', 'Disconnected');
-displayWS.onerror = () => setStatus('error', 'Error');
-displayWS.onmessage = (event) => {
+function handleDisplayMessage(event) {
   if (event.data instanceof ArrayBuffer || event.data instanceof Blob) {
     const blob = event.data instanceof Blob
       ? event.data
@@ -221,8 +302,38 @@ displayWS.onmessage = (event) => {
     let msg; try { msg = JSON.parse(event.data); } catch (e) { return; }
     if (msg.type === 'transcript') transcriptEl.textContent = msg.text;
     else if (msg.type === 'reset') resetSigning(false);
+    else if (msg.type === 'error') {
+      const text = msg.text || msg.error || 'Service unavailable.';
+      setStatus('error', text);
+      transcriptEl.textContent = text;
+    }
   }
-};
+}
+
+let displayReconnectTimer = null;
+
+// Use wss:// when the page is served over HTTPS, otherwise browsers block the
+// insecure ws:// connection as mixed content. Reconnect so the page recovers
+// from server restarts without forcing a new room.
+function connectDisplay() {
+  if (displayReconnectTimer) {
+    clearTimeout(displayReconnectTimer);
+    displayReconnectTimer = null;
+  }
+  displayWS = new WebSocket(wsUrl('display'));
+  displayWS.binaryType = 'arraybuffer';
+  displayWS.onopen = () => setStatus('live', `Live · ${roomId.slice(0, 6)}`);
+  displayWS.onclose = () => {
+    setStatus('error', 'Reconnecting');
+    displayReconnectTimer = setTimeout(connectDisplay, 1500);
+  };
+  displayWS.onerror = () => {
+    try { displayWS.close(); } catch (e) {}
+  };
+  displayWS.onmessage = handleDisplayMessage;
+}
+
+connectDisplay();
 
 let recording    = false;
 let micStream    = null;
@@ -231,7 +342,45 @@ let audioCtx     = null;
 let micSource    = null;
 let micProcessor = null;
 
+async function loadServiceHealth() {
+  try {
+    const response = await fetch('/api/health', { cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const health = await response.json();
+    const services = health.services || {};
+    const issues = [];
+
+    if (!services.deepgram?.configured) {
+      issues.push('Speech input unavailable until DEEPGRAM_API_KEY is configured.');
+      micBtn.dataset.serviceDisabled = 'true';
+      micBtn.disabled = true;
+      micBtn.textContent = 'Speech unavailable';
+      micBtn.title = 'Set DEEPGRAM_API_KEY on the server to enable Speak to Sign.';
+    }
+    if (!services.pose?.reachable) {
+      issues.push('Signing avatar service is offline; start the Python pose server.');
+    }
+    if (!services.openai?.configured) {
+      issues.push('ASL grammar refinement is using raw transcript fallback.');
+    }
+    if (!services.tts?.configured) {
+      issues.push('Voice output is visual-only until TTS is configured.');
+    }
+
+    setServiceNotice(issues);
+  } catch (e) {
+    setServiceNotice(['Service health could not be checked.']);
+  }
+}
+
+loadServiceHealth();
+
 async function startMic() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setStatus('error', 'Mic unavailable');
+    transcriptEl.textContent = 'Microphone access is unavailable in this browser.';
+    return;
+  }
   try {
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (e) {
@@ -241,6 +390,27 @@ async function startMic() {
   }
   micWs = new WebSocket(wsUrl('audio'));
   micWs.binaryType = 'arraybuffer';
+  const activeMicWs = micWs;
+  micWs.onopen = () => setStatus('live', 'Listening');
+  micWs.onmessage = (event) => {
+    let msg; try { msg = JSON.parse(event.data); } catch (e) { return; }
+    if (msg.type === 'error') {
+      const text = msg.text || msg.error || 'Speech connection unavailable.';
+      setStatus('error', text);
+      transcriptEl.textContent = text;
+    }
+  };
+  micWs.onclose = (event) => {
+    if (micWs !== activeMicWs || !recording) return;
+    const text = event.reason || 'Speech connection closed.';
+    stopMic();
+    setStatus('error', text);
+    transcriptEl.textContent = text;
+  };
+  micWs.onerror = () => setStatus('error', 'Speech connection error');
+  recording = true;
+  micBtn.textContent = 'Stop';
+  micBtn.classList.add('recording');
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   audioCtx     = new AudioCtx({ sampleRate: 16000 });
   micSource    = audioCtx.createMediaStreamSource(micStream);
@@ -255,9 +425,6 @@ async function startMic() {
   };
   micSource.connect(micProcessor);
   micProcessor.connect(audioCtx.destination);
-  recording = true;
-  micBtn.textContent = 'Stop';
-  micBtn.classList.add('recording');
 }
 
 function stopMic() {
@@ -268,8 +435,11 @@ function stopMic() {
   try { if (micWs && micWs.readyState === 1) micWs.close(); } catch (e) {}
   micProcessor = micSource = audioCtx = micStream = micWs = null;
   recording = false;
-  micBtn.textContent = 'Start';
+  micBtn.textContent = micBtn.dataset.serviceDisabled === 'true' ? 'Speech unavailable' : 'Start';
   micBtn.classList.remove('recording');
+  if (displayWS && displayWS.readyState === WebSocket.OPEN) {
+    setStatus('live', `Live · ${roomId.slice(0, 6)}`);
+  }
 }
 
 micBtn.addEventListener('click', async () => {
@@ -573,18 +743,26 @@ const signPanel    = document.getElementById('sign-panel');
 
 function enterSpeakMode() {
   stopCamera();
+  signPanel.hidden = true;
+  speakPanel.hidden = false;
   signPanel.style.display  = 'none';
   speakPanel.style.display = 'flex';
   speakModeBtn.classList.add('active');
   signModeBtn.classList.remove('active');
+  speakModeBtn.setAttribute('aria-selected', 'true');
+  signModeBtn.setAttribute('aria-selected', 'false');
 }
 
 function enterSignMode() {
   stopMic();
+  speakPanel.hidden = true;
+  signPanel.hidden = false;
   speakPanel.style.display = 'none';
   signPanel.style.display  = 'flex';
   signModeBtn.classList.add('active');
   speakModeBtn.classList.remove('active');
+  signModeBtn.setAttribute('aria-selected', 'true');
+  speakModeBtn.setAttribute('aria-selected', 'false');
 }
 
 speakModeBtn.addEventListener('click', enterSpeakMode);

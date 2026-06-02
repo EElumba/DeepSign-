@@ -71,7 +71,7 @@ Built with Express + the `ws` WebSocket library. Runs on port 3000.
 
 | Variable | Purpose |
 |---|---|
-| `DEEPGRAM_API_KEY` | Required. Live speech-to-text. |
+| `DEEPGRAM_API_KEY` | Required for Speak→Sign live speech-to-text. |
 | `OPENAI_API_KEY` | Optional. English → ASL gloss. Falls back to raw transcript. |
 | `OPENAI_MODEL` | Default `gpt-4o-mini` (fast/cheap). |
 | `ELEVENLABS_API_KEY` | Optional. TTS for Sign→Speak mode. |
@@ -131,6 +131,7 @@ Pose generation is **serialized per audio connection** via a promise chain so cl
 | `GET` | `/speak?room=<id>` | Serves `index.html` for the requested room |
 | `GET` | `/glasses?room=<id>` | Serves `glasses.html` for the requested room |
 | `GET` | `/api/sessions/new` | Returns a fresh room ID and matching client URLs |
+| `GET` | `/api/health` | Reports configured services and pose-server reachability |
 | `POST` | `/api/recognize` | Proxies landmark frames to Python `/recognize` |
 | `POST` | `/api/gloss-to-english` | Calls OpenAI to convert ASL gloss → natural English |
 | `POST` | `/api/tts` | Proxies text to ElevenLabs TTS; streams MP3 audio back |
