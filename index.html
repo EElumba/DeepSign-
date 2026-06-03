@@ -884,9 +884,12 @@ function setDemoState(key, patch) {
 
 const METRIC_STAGE_LABELS = {
   speech_transcription: 'Speech transcription',
+  transcript_chunk: 'Transcript chunking',
   text_normalization: 'Text normalization',
+  incremental_gloss: 'Incremental gloss',
   gloss: 'Text-to-sign gloss',
   pose_generation: 'Pose generation',
+  pose_streaming: 'Pose streaming',
   alias_resolution: 'Alias resolution',
   simple_gloss: 'Simple glosser',
   pose_library_import: 'Pose library import',
@@ -905,6 +908,7 @@ const METRIC_STAGE_LABELS = {
   network_transfer: 'Network transfer',
   response_body_read: 'Pose transfer read',
   json_serialization: 'JSON serialization',
+  playback_buffer: 'Playback buffer',
   avatar_playback_start: 'Avatar start',
   recognition: 'Recognition',
   gloss_to_english: 'Gloss-to-English',
@@ -1135,35 +1139,65 @@ const poseQueue = [];
 let currentUrl  = null;
 let playing     = false;
 let watchdog    = null;
+let playbackStartTimer = null;
 let displayWS   = null;
 let demoBusy    = false;
 let poseServiceReachable = true;
 let pendingPoseMetric = null;
+const pendingPoseMetadata = [];
 const WATCHDOG_MS = 30000;
+const PLAYBACK_START_BUFFER_MS = 70;
+const PLAYBACK_START_BUFFER_POSES = 2;
 const HEALTH_POLL_MS = 15000;
 const AUDIO_PROCESSOR_BUFFER_SIZE = 1024;
 
-function enqueuePose(blob) {
+function schedulePlaybackStart() {
+  if (playing || !poseQueue.length) return;
+  if (poseQueue.length >= PLAYBACK_START_BUFFER_POSES) {
+    if (playbackStartTimer) {
+      clearTimeout(playbackStartTimer);
+      playbackStartTimer = null;
+    }
+    playNext();
+    return;
+  }
+  if (playbackStartTimer) return;
+  playbackStartTimer = setTimeout(() => {
+    playbackStartTimer = null;
+    if (!playing && poseQueue.length) playNext();
+  }, PLAYBACK_START_BUFFER_MS);
+}
+
+function enqueuePose(blob, metadata = null) {
+  const poseMeta = metadata || pendingPoseMetadata.shift() || pendingPoseMetric || {};
+  if (pendingPoseMetric && poseMeta.pipelineId === pendingPoseMetric.pipelineId) {
+    pendingPoseMetric = null;
+  }
   const entry = {
     url: URL.createObjectURL(blob),
     receivedAt: performance.now(),
-    pipelineId: pendingPoseMetric?.pipelineId || null,
+    pipelineId: poseMeta.pipelineId || null,
+    streamId: poseMeta.streamId || null,
+    sequence: Number.isFinite(Number(poseMeta.sequence)) ? Number(poseMeta.sequence) : null,
+    chunkId: poseMeta.chunkId || null,
+    gloss: poseMeta.gloss || '',
   };
-  pendingPoseMetric = null;
   poseQueue.push(entry);
   setDemoState('avatar', {
     state: playing ? 'ok' : 'pending',
     value: playing ? `Queued (${poseQueue.length})` : 'Loading',
     detail: 'A sign clip arrived for avatar playback.',
   });
-  if (!playing) playNext();
+  schedulePlaybackStart();
 }
 
 function clearPoseQueue() {
   while (poseQueue.length) URL.revokeObjectURL(poseQueue.shift().url);
+  pendingPoseMetadata.length = 0;
 }
 
 function playNext() {
+  if (playbackStartTimer) { clearTimeout(playbackStartTimer); playbackStartTimer = null; }
   if (watchdog) { clearTimeout(watchdog); watchdog = null; }
   if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
   if (!poseQueue.length) {
@@ -1181,6 +1215,8 @@ function playNext() {
   currentUrl = entry.url;
   const url = entry.url;
   const apply = () => {
+    const bufferedMs = performance.now() - entry.receivedAt;
+    sendDisplayMetric('playback_buffer', bufferedMs, entry.pipelineId);
     signer.src = url;
     try { if (typeof signer.play === 'function') signer.play(); } catch (e) {}
     sendDisplayMetric('avatar_playback_start', performance.now() - entry.receivedAt, entry.pipelineId);
@@ -1203,6 +1239,7 @@ function stopSigning() {
 }
 
 function resetSigning(notifyServer = true) {
+  if (playbackStartTimer) { clearTimeout(playbackStartTimer); playbackStartTimer = null; }
   if (watchdog) { clearTimeout(watchdog); watchdog = null; }
   clearPoseQueue();
   if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
@@ -1246,6 +1283,20 @@ function handleDisplayMessage(event) {
   } else {
     let msg; try { msg = JSON.parse(event.data); } catch (e) { return; }
     if (msg.type === 'transcript') transcriptEl.textContent = msg.text;
+    else if (msg.type === 'transcript_chunk') {
+      if (msg.text) demoStatusEl.textContent = `Signing chunk ${msg.sequence || ''}`.trim();
+    }
+    else if (msg.type === 'gloss') {
+      if (msg.gloss) demoStatusEl.textContent = `Gloss ${msg.gloss}`;
+    }
+    else if (msg.type === 'pose' && msg.event === 'chunk') {
+      pendingPoseMetadata.push(msg);
+      setDemoState('avatar', {
+        state: playing ? 'ok' : 'pending',
+        value: playing ? `Queued (${poseQueue.length})` : 'Buffering',
+        detail: msg.gloss ? `Preparing ${msg.gloss}` : 'Preparing sign chunk.',
+      });
+    }
     else if (msg.type === 'reset') resetSigning(false);
     else if (msg.type === 'pairing') renderPairingPresence(Boolean(msg.glassesConnected));
     else if (msg.type === 'metrics') {

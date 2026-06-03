@@ -103,6 +103,14 @@ async function main() {
     const pendingPose = waitForEvent(displaySocket, 'binary .pose on glasses display', (event) => (
       event.kind === 'binary' && event.bytes > 0
     ), config.eventTimeoutMs);
+    const pendingPoseChunk = waitForEvent(displaySocket, 'streaming pose chunk metadata on glasses display', (event) => (
+      event.kind === 'json'
+      && event.data.type === 'pose'
+      && event.data.event === 'chunk'
+      && event.data.streamId
+      && Number.isFinite(Number(event.data.sequence))
+      && event.data.pipelineId
+    ), config.eventTimeoutMs);
     const pendingPoseMetric = waitForEvent(displaySocket, 'pose generation metric on glasses display', (event) => (
       event.kind === 'json'
       && event.data.type === 'metrics'
@@ -121,12 +129,15 @@ async function main() {
     assertEqual(demoResponse.phraseId, config.phraseId, 'demo pose response phrase');
     assertEqual(demoResponse.discarded, false, 'demo pose response discarded');
     assertAtLeast(demoResponse.displayClients, 1, 'demo pose display clients');
+    assertAtLeast(demoResponse.chunks, 1, 'demo pose streamed chunk count');
     pass('sent demo phrase through /speak demo pipeline', `${demoResponse.text} -> ${demoResponse.gloss}`);
 
     const transcriptEvent = await pendingTranscript;
+    const poseChunkEvent = await pendingPoseChunk;
     const poseEvent = await pendingPose;
     const poseMetricEvent = await pendingPoseMetric;
     pass('glasses display received transcript', transcriptEvent.data.text);
+    pass('glasses display received stream chunk metadata', `${poseChunkEvent.data.streamId}#${poseChunkEvent.data.sequence}`);
     pass('glasses display received avatar/sign output', `${poseEvent.bytes} bytes`);
     pass('glasses display received pose timing metric', `${poseMetricEvent.data.event.durationMs}ms`);
 

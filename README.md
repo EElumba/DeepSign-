@@ -1,16 +1,19 @@
 # ASL Pose Avatar MVP
 
 Real-time speech → ASL stick-figure signer. You speak into a Ray-Ban Meta glasses
-mic, Deepgram transcribes it, a Python server converts the text into a `.pose`
-skeleton file via [`spoken-to-signed-translation`](https://github.com/ZurichNLP/spoken-to-signed-translation),
+mic, Deepgram transcribes it, Node commits short transcript chunks as soon as
+they are finalized, the Python server converts each chunk into a `.pose`
+skeleton clip via [`spoken-to-signed-translation`](https://github.com/ZurichNLP/spoken-to-signed-translation),
 and the [`pose-viewer`](https://www.npmjs.com/package/pose-viewer) web component
-animates the signer in the glasses browser.
+progressively animates the signer in the glasses browser.
 
 ```
-Mic → Node /ws/audio/<room> WS → Deepgram Nova-3 → Node POST :8000/pose
-    → Python FastAPI (text_to_gloss_to_pose) → .pose binary
-    → Node sends ArrayBuffer to /ws/display/<room> clients only
-    → pose-viewer renders the signer
+Mic → Node /ws/audio/<room> WS → Deepgram Nova-3
+    → finalized transcript chunk → incremental ASL gloss
+    → Node POST :8000/pose per chunk
+    → Python FastAPI cached lexicon lookup → .pose binary clip
+    → Node sends pose metadata + ArrayBuffer to /ws/display/<room> clients only
+    → browser playback buffer → pose-viewer renders progressive signing
 ```
 
 ## Prerequisites
@@ -58,6 +61,17 @@ Visit `/api/health` to see which services are configured and whether the Python
 pose server is reachable. Speak→Sign requires `DEEPGRAM_API_KEY`; OpenAI glossing
 and ElevenLabs speech output fall back gracefully when unset.
 
+### Streaming latency controls
+
+Live signing is chunked by default so the avatar can start before a full phrase
+is complete. Tune the stream with these optional environment variables:
+
+- `STREAM_CHUNK_TARGET_WORDS` default `3`: finalized words per normal sign chunk.
+- `STREAM_CHUNK_MAX_WORDS` default `5`: largest forced chunk at speech end.
+- `STREAM_CHUNK_IDLE_MS` default `80`: wait before signing a short leftover chunk.
+- `STREAM_OPENAI_GLOSS=1`: opt into OpenAI glossing for streaming chunks. The
+  default is local incremental glossing to minimize perceived latency.
+
 For demos, the companion `/speak` page includes curated no-mic phrase buttons.
 Clicking one posts to `/api/demo/pose`, generates a pose through the Python
 server, and broadcasts it to every display client in the same private room
@@ -100,7 +114,8 @@ Express frontend on `127.0.0.1:3130`, then:
 - loads the matching `/speak?room=<id>` and `/glasses?room=<id>` pages
 - joins `/ws/display/<room-id>?client=glasses`
 - posts the curated demo phrase to `/api/demo/pose`, the same no-mic path used by `/speak`
-- passes only if the glasses display WebSocket receives both the final transcript JSON and a non-empty binary `.pose` blob
+- passes only if the glasses display WebSocket receives the final transcript
+  JSON, streaming pose chunk metadata, and a non-empty binary `.pose` blob
 
 No raw audio or video is captured or stored. The smoke test uses the demo phrase
 path specifically so it can exercise the signing pipeline without microphone or

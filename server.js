@@ -20,19 +20,26 @@ if (!DEEPGRAM_API_KEY) {
 // Strip trailing slashes so `${POSE_SERVER_URL}/pose` never becomes `//pose`
 // (a double slash 404s on FastAPI/Starlette).
 const POSE_SERVER_URL = (process.env.POSE_SERVER_URL || 'http://localhost:8000').replace(/\/+$/, '');
-const FINAL_FLUSH_DELAY_MS = Number(process.env.FINAL_FLUSH_DELAY_MS || 120);
 const POSE_TIMEOUT_MS = Number(process.env.POSE_TIMEOUT_MS || 30000);
 const ROOM_IDLE_TTL_MS = Number(process.env.ROOM_IDLE_TTL_MS || 60000);
 const PAIRING_LINK_TTL_MS = Number(process.env.PAIRING_LINK_TTL_MS || 30 * 60 * 1000);
+const STREAM_CHUNK_MIN_WORDS = Math.max(1, Number(process.env.STREAM_CHUNK_MIN_WORDS || 1));
+const STREAM_CHUNK_TARGET_WORDS = Math.max(STREAM_CHUNK_MIN_WORDS, Number(process.env.STREAM_CHUNK_TARGET_WORDS || 3));
+const STREAM_CHUNK_MAX_WORDS = Math.max(STREAM_CHUNK_TARGET_WORDS, Number(process.env.STREAM_CHUNK_MAX_WORDS || 5));
+const STREAM_CHUNK_IDLE_MS = Math.max(0, Number(process.env.STREAM_CHUNK_IDLE_MS || process.env.FINAL_FLUSH_DELAY_MS || 80));
+const STREAM_OPENAI_GLOSS = process.env.STREAM_OPENAI_GLOSS === '1';
 const ROOM_ID_PATTERN = /^[a-zA-Z0-9_-]{6,80}$/;
 const PAIRING_TOKEN_PATTERN = /^[a-zA-Z0-9_-]{16,128}$/;
 const DEMO_POSE_ENABLED = process.env.DEMO_POSE_ENABLED !== '0';
 const ALLOW_CUSTOM_DEMO_POSE = process.env.ALLOW_CUSTOM_DEMO_POSE === '1';
 const METRIC_STAGES = Object.freeze([
   'speech_transcription',
+  'transcript_chunk',
   'text_normalization',
+  'incremental_gloss',
   'gloss',
   'pose_generation',
+  'pose_streaming',
   'alias_resolution',
   'simple_gloss',
   'pose_library_import',
@@ -51,6 +58,7 @@ const METRIC_STAGES = Object.freeze([
   'network_transfer',
   'response_body_read',
   'json_serialization',
+  'playback_buffer',
   'avatar_playback_start',
   'recognition',
   'gloss_to_english',
@@ -58,7 +66,9 @@ const METRIC_STAGES = Object.freeze([
 ]);
 const LATENCY_BREAKDOWN_STAGES = Object.freeze([
   'speech_transcription',
+  'transcript_chunk',
   'text_normalization',
+  'incremental_gloss',
   'gloss',
   'alias_resolution',
   'simple_gloss',
@@ -69,6 +79,8 @@ const LATENCY_BREAKDOWN_STAGES = Object.freeze([
   'pose_processing',
   'pose_serialization',
   'network_transfer',
+  'pose_streaming',
+  'playback_buffer',
   'avatar_playback_start',
   'recognition',
   'gloss_to_english',
@@ -406,6 +418,98 @@ function expandDigitsForSigning(text) {
 
 function normalizePhraseText(value) {
   return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+const LOCAL_ASL_DROP_WORDS = new Set([
+  'a',
+  'an',
+  'the',
+  'is',
+  'am',
+  'are',
+  'was',
+  'were',
+  'be',
+  'been',
+  'being',
+  'to',
+  'of',
+]);
+
+const LOCAL_ASL_REPLACEMENTS = new Map([
+  ["i'm", 'me'],
+  ['im', 'me'],
+  ["you're", 'you'],
+  ['youre', 'you'],
+  ["we're", 'we'],
+  ["they're", 'they'],
+  ['theyre', 'they'],
+  ["don't", 'not'],
+  ['dont', 'not'],
+  ["won't", 'not'],
+  ['wont', 'not'],
+  ["can't", 'cannot'],
+  ['cant', 'cannot'],
+  ['yeah', 'yes'],
+  ['yep', 'yes'],
+  ['nope', 'no'],
+  ['hi', 'hello'],
+  ['okay', 'ok'],
+  ['thanks', 'thank'],
+]);
+
+function normalizeTranscriptWord(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^[^a-z0-9']+|[^a-z0-9']+$/g, '');
+}
+
+function transcriptWords(text) {
+  return expandDigitsForSigning(text)
+    .replace(/[^a-zA-Z0-9'\s-]+/g, ' ')
+    .split(/\s+/)
+    .map(normalizeTranscriptWord)
+    .filter(Boolean);
+}
+
+function splitWordsIntoStreamingChunks(words, targetSize = STREAM_CHUNK_TARGET_WORDS) {
+  const chunks = [];
+  const pending = [...words];
+  const size = Math.max(1, Math.min(STREAM_CHUNK_MAX_WORDS, targetSize));
+  while (pending.length > 0) {
+    chunks.push(pending.splice(0, Math.min(size, pending.length)).join(' '));
+  }
+  return chunks;
+}
+
+function localIncrementalGloss(text) {
+  const words = transcriptWords(text);
+  const glossWords = [];
+
+  for (const word of words) {
+    const replacement = LOCAL_ASL_REPLACEMENTS.get(word) || word;
+    if (LOCAL_ASL_DROP_WORDS.has(replacement)) continue;
+    glossWords.push(replacement);
+  }
+
+  const signableWords = glossWords.length ? glossWords : words;
+  return signableWords.join(' ').toUpperCase();
+}
+
+async function incrementalEnglishToAslGlossResult(text, options = {}) {
+  const words = transcriptWords(text);
+  if (STREAM_OPENAI_GLOSS && openai && words.length >= STREAM_CHUNK_TARGET_WORDS) {
+    return englishToAslGlossResult(text);
+  }
+
+  return {
+    gloss: localIncrementalGloss(text) || text,
+    status: STREAM_OPENAI_GLOSS && !openai ? 'incremental_local_no_openai' : 'incremental_local',
+    cacheHit: false,
+    errorCategory: null,
+    final: Boolean(options.final),
+  };
 }
 
 function findDemoPhrase({ phraseId, text }) {
@@ -845,6 +949,13 @@ app.get('/api/health', async (req, res) => {
         status: DEMO_POSE_ENABLED ? 'available' : 'disabled',
         phraseCount: DEMO_PHRASES.length,
       },
+      streaming: {
+        transcriptChunkMinWords: STREAM_CHUNK_MIN_WORDS,
+        transcriptChunkTargetWords: STREAM_CHUNK_TARGET_WORDS,
+        transcriptChunkMaxWords: STREAM_CHUNK_MAX_WORDS,
+        idleFlushMs: STREAM_CHUNK_IDLE_MS,
+        openaiGlossEnabled: STREAM_OPENAI_GLOSS,
+      },
     },
     rooms: roomsAggregateSnapshot(),
     room: roomId ? roomStatusSnapshot(room, roomId) : null,
@@ -900,76 +1011,35 @@ app.post('/api/demo/pose', async (req, res) => {
 
   const room = getRoom(roomId);
   const generation = room.poseGeneration;
-  const pipelineId = createPipelineId();
+  const streamId = createPipelineId();
 
   try {
-    let normalizationMs = 0;
-    let normalizeStartedAt = performance.now();
-    const signableText = expandDigitsForSigning(phrase.text);
-    normalizationMs += performance.now() - normalizeStartedAt;
-
-    const glossStartedAt = performance.now();
-    const glossResult = await englishToAslGlossResult(signableText);
-    normalizeStartedAt = performance.now();
-    const gloss = expandDigitsForSigning(glossResult.gloss);
-    normalizationMs += performance.now() - normalizeStartedAt;
-    recordTiming(room, 'text_normalization', normalizationMs, {
-      route: '/api/demo/pose',
-      source: 'demo',
-      status: 'ok',
-      pipelineId,
-      broadcast: false,
-    });
-    recordTiming(room, 'gloss', performance.now() - glossStartedAt, {
-      route: '/api/demo/pose',
-      source: 'demo',
-      status: glossResult.status,
-      pipelineId,
-    });
-    if (glossResult.errorCategory) {
-      recordFailure(room, glossResult.errorCategory, {
-        route: '/api/demo/pose',
-        source: 'demo',
-        status: glossResult.status,
-        pipelineId,
-      });
-    }
-
     broadcastToRoom(room, JSON.stringify({
       type: 'transcript',
       roomId: room.id,
       source: 'demo',
       text: phrase.text,
       is_final: true,
+      streaming: true,
     }));
 
-    const poseResult = await generatePose(gloss);
-    recordPoseDetailTimings(room, poseResult, {
+    const streamResult = await streamTextToPose(room, phrase.text, {
       route: '/api/demo/pose',
       source: 'demo',
-      status: poseResult.status,
-      pipelineId,
-    });
-    recordTiming(room, 'pose_generation', poseResult.durationMs, {
-      route: '/api/demo/pose',
-      source: 'demo',
-      status: poseResult.status,
-      pipelineId,
+      streamId,
+      generation,
+      reason: 'demo',
     });
 
-    if (!poseResult.ok) {
+    if (!streamResult.chunks.some((chunk) => chunk.ok)) {
       const message = 'Demo signing is unavailable. Make sure the Python pose server is running.';
-      broadcastError(room, message, 'pose', poseResult.errorCategory, {
+      broadcastError(room, message, 'pose', 'demo_pose_unavailable', {
         route: '/api/demo/pose',
         source: 'demo',
-        pipelineId,
-        status: poseResult.status,
+        pipelineId: streamId,
+        status: 'error',
       });
       return res.status(503).json({ error: message });
-    }
-
-    if (generation === room.poseGeneration) {
-      broadcastToRoom(room, Buffer.from(poseResult.arrayBuffer));
     }
 
     return res.json({
@@ -977,9 +1047,11 @@ app.post('/api/demo/pose', async (req, res) => {
       roomId: room.id,
       phraseId: phrase.id,
       text: phrase.text,
-      gloss,
+      gloss: streamResult.gloss,
+      streamId,
+      chunks: streamResult.chunks.length,
       displayClients: room.displayClients.size,
-      discarded: generation !== room.poseGeneration,
+      discarded: streamResult.discarded,
     });
   } catch (err) {
     console.error('[Demo] pose generation failed:', err.name || 'error');
@@ -987,7 +1059,7 @@ app.post('/api/demo/pose', async (req, res) => {
     broadcastError(room, message, 'pose', 'demo_pose_error', {
       route: '/api/demo/pose',
       source: 'demo',
-      pipelineId,
+      pipelineId: streamId,
     });
     return res.status(500).json({ error: message });
   } finally {
@@ -1405,6 +1477,199 @@ async function generatePose(text) {
   }
 }
 
+async function processPoseStreamChunk(room, chunk, meta = {}) {
+  const generation = Number.isInteger(meta.generation) ? meta.generation : room.poseGeneration;
+  const source = meta.source || 'speech';
+  const route = meta.route || '/ws/audio';
+  const streamId = chunk.streamId || createPipelineId();
+  const sequence = Number.isInteger(chunk.sequence) ? chunk.sequence : 0;
+  const pipelineId = chunk.pipelineId || createPipelineId();
+  const chunkId = chunk.chunkId || `${streamId}-${sequence}`;
+  const chunkStartedAt = performance.now();
+  const chunkText = transcriptWords(chunk.text).join(' ');
+
+  if (!chunkText) return null;
+
+  recordTiming(room, 'transcript_chunk', chunk.readyMs || 0, {
+    route,
+    source,
+    status: chunk.reason || 'ready',
+    pipelineId,
+  });
+
+  broadcastToRoom(room, JSON.stringify({
+    type: 'transcript_chunk',
+    roomId: room.id,
+    source,
+    streamId,
+    chunkId,
+    sequence,
+    text: chunkText,
+    is_final: Boolean(chunk.final),
+    reason: chunk.reason || 'stream',
+  }));
+
+  let normalizationMs = 0;
+  let normalizeStartedAt = performance.now();
+  const signableText = expandDigitsForSigning(chunkText);
+  normalizationMs += performance.now() - normalizeStartedAt;
+
+  const glossStartedAt = performance.now();
+  const glossResult = await incrementalEnglishToAslGlossResult(signableText, {
+    final: Boolean(chunk.final),
+  });
+  const glossDurationMs = performance.now() - glossStartedAt;
+  normalizeStartedAt = performance.now();
+  const gloss = expandDigitsForSigning(glossResult.gloss);
+  normalizationMs += performance.now() - normalizeStartedAt;
+
+  recordTiming(room, 'text_normalization', normalizationMs, {
+    route,
+    source,
+    status: 'ok',
+    pipelineId,
+    broadcast: false,
+  });
+  recordTiming(room, 'incremental_gloss', glossDurationMs, {
+    route,
+    source,
+    status: glossResult.status,
+    pipelineId,
+  });
+  recordTiming(room, 'gloss', glossDurationMs, {
+    route,
+    source,
+    status: glossResult.status,
+    pipelineId,
+    broadcast: false,
+  });
+
+  if (glossResult.errorCategory) {
+    recordFailure(room, glossResult.errorCategory, {
+      route,
+      source,
+      status: glossResult.status,
+      pipelineId,
+    });
+  }
+
+  broadcastToRoom(room, JSON.stringify({
+    type: 'gloss',
+    roomId: room.id,
+    source,
+    streamId,
+    chunkId,
+    sequence,
+    text: chunkText,
+    gloss,
+    is_final: Boolean(chunk.final),
+    status: glossResult.status,
+  }));
+
+  const poseResult = await generatePose(gloss);
+  recordPoseDetailTimings(room, poseResult, {
+    route,
+    source,
+    status: poseResult.status,
+    pipelineId,
+  });
+  recordTiming(room, 'pose_generation', poseResult.durationMs, {
+    route,
+    source,
+    status: poseResult.status,
+    pipelineId,
+  });
+
+  if (!poseResult.ok) {
+    if (generation === room.poseGeneration) {
+      broadcastError(room, 'Signing service is unavailable. Make sure the Python pose server is running.', 'pose', poseResult.errorCategory, {
+        route,
+        source,
+        pipelineId,
+        status: poseResult.status,
+      });
+    }
+    return {
+      ok: false,
+      pipelineId,
+      streamId,
+      chunkId,
+      sequence,
+      text: chunkText,
+      gloss,
+      status: poseResult.status,
+    };
+  }
+
+  if (generation === room.poseGeneration) {
+    broadcastToRoom(room, JSON.stringify({
+      type: 'pose',
+      event: 'chunk',
+      roomId: room.id,
+      source,
+      streamId,
+      chunkId,
+      sequence,
+      pipelineId,
+      text: chunkText,
+      gloss,
+      is_final: Boolean(chunk.final),
+      reason: chunk.reason || 'stream',
+      bytes: poseResult.bytes,
+      queuedAt: metricTimestamp(),
+    }));
+    broadcastToRoom(room, Buffer.from(poseResult.arrayBuffer));
+    recordTiming(room, 'pose_streaming', performance.now() - chunkStartedAt, {
+      route,
+      source,
+      status: 'ok',
+      pipelineId,
+    });
+  }
+
+  return {
+    ok: true,
+    pipelineId,
+    streamId,
+    chunkId,
+    sequence,
+    text: chunkText,
+    gloss,
+    bytes: poseResult.bytes,
+    discarded: generation !== room.poseGeneration,
+  };
+}
+
+async function streamTextToPose(room, text, meta = {}) {
+  const streamId = meta.streamId || createPipelineId();
+  const words = transcriptWords(text);
+  const chunks = splitWordsIntoStreamingChunks(words);
+  const generation = Number.isInteger(meta.generation) ? meta.generation : room.poseGeneration;
+  const results = [];
+
+  for (let i = 0; i < chunks.length; i += 1) {
+    const result = await processPoseStreamChunk(room, {
+      text: chunks[i],
+      streamId,
+      sequence: i + 1,
+      final: i === chunks.length - 1,
+      reason: meta.reason || 'manual',
+      readyMs: 0,
+    }, {
+      ...meta,
+      generation,
+    });
+    if (result) results.push(result);
+  }
+
+  return {
+    streamId,
+    chunks: results,
+    gloss: results.map((result) => result.gloss).filter(Boolean).join(' '),
+    discarded: generation !== room.poseGeneration,
+  };
+}
+
 function broadcastToRoom(room, data) {
   room.lastActivityAt = Date.now();
   for (const client of room.displayClients) {
@@ -1460,9 +1725,9 @@ function broadcastPairingState(room) {
 
 function handleClientMetric(room, msg, clientType) {
   const eventName = normalizeMetricToken(msg.event || msg.stage, '');
-  if (eventName !== 'avatar_playback_start') return;
+  if (!['avatar_playback_start', 'playback_buffer'].includes(eventName)) return;
 
-  recordTiming(room, 'avatar_playback_start', msg.durationMs, {
+  recordTiming(room, eventName, msg.durationMs, {
     route: '/ws/display',
     source: clientType,
     status: msg.status || 'ok',
@@ -1574,13 +1839,13 @@ wss.on('connection', (ws, request) => {
     return;
   }
 
-  // Sentence-level batching: ASL gloss reordering needs a whole clause, so we
-  // accumulate finalized words and flush a full utterance at a time — on
-  // speech_final (end of utterance), at a safety cap (so a long monologue still
-  // signs), and on disconnect. Each utterance is glossed to ASL then signed.
-  const MAX_BUFFERED_WORDS = 16;
+  // Streaming batching: commit short, finalized transcript chunks as soon as
+  // they are stable enough to sign. Each chunk is glossed, posed, and broadcast
+  // independently so the avatar can begin while the speaker is still talking.
+  const streamId = createPipelineId();
   let wordBuffer = [];
-  let finalFlushTimer = null;
+  let chunkFlushTimer = null;
+  let chunkSequence = 0;
   let speechSegmentStartedAt = null;
   // Serialize gloss+pose generation per connection so clips are broadcast in order.
   let poseChain = Promise.resolve();
@@ -1589,76 +1854,43 @@ wss.on('connection', (ws, request) => {
     reset() {
       wordBuffer = [];
       speechSegmentStartedAt = null;
-      if (finalFlushTimer) {
-        clearTimeout(finalFlushTimer);
-        finalFlushTimer = null;
+      if (chunkFlushTimer) {
+        clearTimeout(chunkFlushTimer);
+        chunkFlushTimer = null;
       }
       poseChain = Promise.resolve();
     },
   };
   room.audioSessions.add(session);
 
-  function enqueuePose(text) {
+  function clearChunkFlushTimer() {
+    if (chunkFlushTimer) {
+      clearTimeout(chunkFlushTimer);
+      chunkFlushTimer = null;
+    }
+  }
+
+  function enqueuePoseChunk(text, options = {}) {
     const generation = room.poseGeneration;
+    const sequence = ++chunkSequence;
     const pipelineId = createPipelineId();
+    const readyStartedAt = Number.isFinite(options.readyStartedAt)
+      ? options.readyStartedAt
+      : performance.now();
     poseChain = poseChain
-      .then(async () => {
-        let normalizationMs = 0;
-        let normalizeStartedAt = performance.now();
-        const signableText = expandDigitsForSigning(text);
-        normalizationMs += performance.now() - normalizeStartedAt;
-
-        const glossStartedAt = performance.now();
-        const glossResult = await englishToAslGlossResult(signableText);
-        normalizeStartedAt = performance.now();
-        const gloss = expandDigitsForSigning(glossResult.gloss);
-        normalizationMs += performance.now() - normalizeStartedAt;
-        recordTiming(room, 'text_normalization', normalizationMs, {
-          route: '/ws/audio',
-          source: 'speech',
-          status: 'ok',
-          pipelineId,
-          broadcast: false,
-        });
-        recordTiming(room, 'gloss', performance.now() - glossStartedAt, {
-          route: '/ws/audio',
-          source: 'speech',
-          status: glossResult.status,
-          pipelineId,
-        });
-        if (glossResult.errorCategory) {
-          recordFailure(room, glossResult.errorCategory, {
-            route: '/ws/audio',
-            source: 'speech',
-            status: glossResult.status,
-            pipelineId,
-          });
-        }
-
-        const poseResult = await generatePose(gloss);
-        recordPoseDetailTimings(room, poseResult, {
-          route: '/ws/audio',
-          source: 'speech',
-          status: poseResult.status,
-          pipelineId,
-        });
-        recordTiming(room, 'pose_generation', poseResult.durationMs, {
-          route: '/ws/audio',
-          source: 'speech',
-          status: poseResult.status,
-          pipelineId,
-        });
-        if (poseResult.ok && generation === room.poseGeneration) {
-          broadcastToRoom(room, Buffer.from(poseResult.arrayBuffer));
-        } else if (generation === room.poseGeneration) {
-          broadcastError(room, 'Signing service is unavailable. Make sure the Python pose server is running.', 'pose', poseResult.errorCategory, {
-            route: '/ws/audio',
-            source: 'speech',
-            pipelineId,
-            status: poseResult.status,
-          });
-        }
-      })
+      .then(() => processPoseStreamChunk(room, {
+        text,
+        streamId,
+        sequence,
+        pipelineId,
+        final: Boolean(options.final),
+        reason: options.reason || 'final',
+        readyMs: performance.now() - readyStartedAt,
+      }, {
+        route: '/ws/audio',
+        source: 'speech',
+        generation,
+      }))
       .catch((err) => {
         recordFailure(room, 'pose_pipeline_error', {
           route: '/ws/audio',
@@ -1669,20 +1901,41 @@ wss.on('connection', (ws, request) => {
       });
   }
 
-  function flushUtterance() {
-    if (finalFlushTimer) {
-      clearTimeout(finalFlushTimer);
-      finalFlushTimer = null;
-    }
-    if (wordBuffer.length > 0) {
-      enqueuePose(wordBuffer.splice(0).join(' '));
-      speechSegmentStartedAt = null;
-    }
+  function scheduleStreamingFlush(readyStartedAt) {
+    if (chunkFlushTimer) return;
+    chunkFlushTimer = setTimeout(() => {
+      chunkFlushTimer = null;
+      flushStreamingChunks({
+        force: true,
+        reason: 'idle',
+        readyStartedAt,
+      });
+    }, STREAM_CHUNK_IDLE_MS);
   }
 
-  function scheduleFinalFlush() {
-    if (finalFlushTimer || FINAL_FLUSH_DELAY_MS < 0) return;
-    finalFlushTimer = setTimeout(flushUtterance, FINAL_FLUSH_DELAY_MS);
+  function flushStreamingChunks(options = {}) {
+    const force = Boolean(options.force);
+    const readyStartedAt = Number.isFinite(options.readyStartedAt)
+      ? options.readyStartedAt
+      : performance.now();
+
+    if (force) clearChunkFlushTimer();
+
+    while (wordBuffer.length >= STREAM_CHUNK_TARGET_WORDS || (force && wordBuffer.length > 0)) {
+      const chunkSize = force
+        ? Math.min(STREAM_CHUNK_MAX_WORDS, wordBuffer.length)
+        : Math.min(STREAM_CHUNK_TARGET_WORDS, wordBuffer.length);
+      const text = wordBuffer.splice(0, chunkSize).join(' ');
+      enqueuePoseChunk(text, {
+        final: force && wordBuffer.length === 0,
+        reason: options.reason || (force ? 'flush' : 'final'),
+        readyStartedAt,
+      });
+    }
+
+    if (!force && wordBuffer.length >= STREAM_CHUNK_MIN_WORDS) {
+      scheduleStreamingFlush(readyStartedAt);
+    }
   }
 
   let dgLive;
@@ -1703,6 +1956,7 @@ wss.on('connection', (ws, request) => {
     });
 
     dgLive.on(LiveTranscriptionEvents.Transcript, (data) => {
+      const transcriptReceivedAt = performance.now();
       const transcript = data?.channel?.alternatives?.[0]?.transcript;
       if (!transcript) return;
 
@@ -1712,6 +1966,7 @@ wss.on('connection', (ws, request) => {
         roomId: room.id,
         text: transcript,
         is_final: data.is_final,
+        streaming: true,
       }));
 
       // Only finalized words feed the pose pipeline (interim words can change).
@@ -1722,20 +1977,26 @@ wss.on('connection', (ws, request) => {
           route: '/ws/audio',
           source: 'deepgram',
           status: data.speech_final ? 'speech_final' : 'final',
+          pipelineId: streamId,
         });
       }
 
-      const signableTranscript = expandDigitsForSigning(transcript);
-      const words = signableTranscript.trim().split(/\s+/).filter(Boolean);
+      const words = transcriptWords(transcript);
       if (words.length) wordBuffer.push(...words);
 
-      // Flush immediately at end-of-speech or when the buffer gets long enough.
-      // Otherwise, flush shortly after finalized text so the avatar starts
-      // signing before Deepgram's endpoint detector notices a full pause.
-      if (data.speech_final || wordBuffer.length >= MAX_BUFFERED_WORDS) {
-        flushUtterance();
+      if (data.speech_final) {
+        flushStreamingChunks({
+          force: true,
+          reason: 'speech_final',
+          readyStartedAt: transcriptReceivedAt,
+        });
+        speechSegmentStartedAt = null;
       } else {
-        scheduleFinalFlush();
+        flushStreamingChunks({
+          force: false,
+          reason: 'final',
+          readyStartedAt: transcriptReceivedAt,
+        });
       }
     });
 
@@ -1784,8 +2045,12 @@ wss.on('connection', (ws, request) => {
   ws.on('close', () => {
     room.audioSessions.delete(session);
     console.log(`[Room ${room.id}] Audio client disconnected — finishing Deepgram session.`);
-    // Sign whatever words are left over so the final utterance isn't dropped.
-    flushUtterance();
+    // Sign whatever words are left over so the final chunk is not dropped.
+    flushStreamingChunks({
+      force: true,
+      reason: 'disconnect',
+      readyStartedAt: performance.now(),
+    });
     try {
       if (dgLive) dgLive.finish();
     } catch (err) {
