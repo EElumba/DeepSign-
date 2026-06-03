@@ -100,10 +100,16 @@ https://<your-domain>/speak?room=<room-id>
 https://<your-domain>/glasses?room=<room-id>
 ```
 
-For programmatic pairing or QR-code flows, `GET /api/sessions/new` returns a
-fresh room ID plus the matching speak/glasses URLs. During migration, older
-WebSocket clients can still use `/audio?room=<room-id>` and `/?room=<room-id>`,
-but clients without a valid room are rejected instead of joining a global pool.
+The `/speak` page shows a pairing panel with a QR code for the matching
+`/glasses` room link. It also keeps a copyable manual glasses link as a fallback.
+Tokenized QR/copy links expire if the room is gone or the pairing token ages
+out; legacy `/glasses?room=<room-id>` URLs still work for manual testing.
+
+For programmatic pairing, `GET /api/sessions/new` returns a fresh room ID plus
+matching client URLs, and `GET /api/sessions/<room-id>/pairing` returns the
+tokenized glasses link and QR SVG URL. During migration, older WebSocket clients
+can still use `/audio?room=<room-id>` and `/?room=<room-id>`, but clients without
+a valid room are rejected instead of joining a global pool.
 
 ## Open on Meta Ray-Ban Display glasses (Web App)
 
@@ -140,8 +146,10 @@ captouch). It auto-connects and auto-reconnects.
 1. Deploy over **HTTPS** (Railway already does this).
 2. In the **Meta AI app** → Settings → App Info, tap the version number **5×** to enable **Developer Mode**.
 3. Open `https://<your-railway-domain>/speak` on a phone/laptop first. It will
-   redirect to `https://<your-railway-domain>/speak?room=<room-id>`.
-4. In the Meta AI app → your **Display Glasses** → **App connections → Web apps → Add a web app**, enter the matching glasses URL:
+   redirect to `https://<your-railway-domain>/speak?room=<room-id>` and show the
+   pairing QR code.
+4. Scan the QR code from the glasses/secondary device. If QR scanning is not
+   available, use **Copy link** and enter the matching glasses URL manually:
    ```
    https://<your-railway-domain>/glasses?room=<room-id>
    ```

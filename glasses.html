@@ -100,7 +100,8 @@
 
     function wsUrl(role) {
       const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-      return `${wsProto}://${location.host}/ws/${role}/${encodeURIComponent(roomId)}`;
+      const clientParam = role === 'display' ? '?client=glasses' : '';
+      return `${wsProto}://${location.host}/ws/${role}/${encodeURIComponent(roomId)}${clientParam}`;
     }
 
     // --- Pose playback queue ---

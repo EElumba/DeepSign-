@@ -136,6 +136,8 @@ Pose generation is **serialized per audio connection** via a promise chain so cl
 | `GET` | `/speak?room=<id>` | Serves `index.html` for the requested room |
 | `GET` | `/glasses?room=<id>` | Serves `glasses.html` for the requested room |
 | `GET` | `/api/sessions/new` | Returns a fresh room ID and matching client URLs |
+| `GET` | `/api/sessions/:roomId/pairing` | Returns the tokenized glasses pairing link and QR SVG URL |
+| `GET` | `/api/sessions/:roomId/glasses-qr.svg` | Renders the QR code for the tokenized glasses link |
 | `GET` | `/api/health` | Reports configured services and pose-server reachability |
 | `GET` | `/api/demo/phrases` | Returns the curated no-mic phrase list |
 | `POST` | `/api/demo/pose` | Generates a demo pose and broadcasts it to a private room |

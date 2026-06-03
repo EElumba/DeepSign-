@@ -8,6 +8,7 @@ import { randomUUID } from 'crypto';
 import fetch from 'node-fetch';
 import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
 import OpenAI from 'openai';
+import QRCode from 'qrcode';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -22,7 +23,9 @@ const POSE_SERVER_URL = (process.env.POSE_SERVER_URL || 'http://localhost:8000')
 const FINAL_FLUSH_DELAY_MS = Number(process.env.FINAL_FLUSH_DELAY_MS || 120);
 const POSE_TIMEOUT_MS = Number(process.env.POSE_TIMEOUT_MS || 30000);
 const ROOM_IDLE_TTL_MS = Number(process.env.ROOM_IDLE_TTL_MS || 60000);
+const PAIRING_LINK_TTL_MS = Number(process.env.PAIRING_LINK_TTL_MS || 30 * 60 * 1000);
 const ROOM_ID_PATTERN = /^[a-zA-Z0-9_-]{6,80}$/;
+const PAIRING_TOKEN_PATTERN = /^[a-zA-Z0-9_-]{16,128}$/;
 const DEMO_POSE_ENABLED = process.env.DEMO_POSE_ENABLED !== '0';
 const ALLOW_CUSTOM_DEMO_POSE = process.env.ALLOW_CUSTOM_DEMO_POSE === '1';
 
@@ -142,6 +145,7 @@ async function englishToAslGloss(text) {
 }
 
 const app = express();
+app.set('trust proxy', true);
 app.use(express.json({ limit: '5mb' }));
 
 // Room-local state. A room represents one private conversation. All transcripts,
@@ -157,8 +161,140 @@ function normalizeRoomId(value) {
   return ROOM_ID_PATTERN.test(roomId) ? roomId : '';
 }
 
+function normalizePairingToken(value) {
+  const token = String(value || '').trim();
+  return PAIRING_TOKEN_PATTERN.test(token) ? token : '';
+}
+
 function roomPath(pathname, roomId) {
   return `${pathname}?room=${encodeURIComponent(roomId)}`;
+}
+
+function requestOrigin(req) {
+  const forwardedProto = String(req.get('x-forwarded-proto') || '').split(',')[0].trim();
+  const forwardedHost = String(req.get('x-forwarded-host') || '').split(',')[0].trim();
+  const proto = forwardedProto || req.protocol || 'http';
+  const host = forwardedHost || req.get('host') || `localhost:${PORT}`;
+  return `${proto}://${host}`;
+}
+
+function absoluteRoomUrl(req, pathname, roomId) {
+  const url = new URL(pathname, requestOrigin(req));
+  url.searchParams.set('room', roomId);
+  return url.toString();
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function sendRoomLinkError(res, status, title, message) {
+  res.status(status).type('html').send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${escapeHtml(title)}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      background: #000; color: #fff; font-family: monospace; padding: 20px;
+    }
+    main {
+      width: min(100%, 440px); border: 1px solid #333; border-radius: 8px;
+      background: #111; padding: 18px; display: grid; gap: 12px;
+    }
+    h1 { margin: 0; font-size: 20px; }
+    p { margin: 0; color: #ddd; line-height: 1.45; }
+    a {
+      display: inline-block; color: #000; background: #ffe14d;
+      padding: 10px 12px; border-radius: 6px; text-decoration: none;
+      font-weight: 700; text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>${escapeHtml(title)}</h1>
+    <p>${escapeHtml(message)}</p>
+    <a href="/speak">Start a new conversation</a>
+  </main>
+</body>
+</html>`);
+}
+
+function ensurePairingToken(room) {
+  if (!room.pairingToken || Date.now() >= room.pairingExpiresAt) {
+    room.pairingToken = randomUUID().replace(/-/g, '');
+    room.pairingExpiresAt = Date.now() + PAIRING_LINK_TTL_MS;
+  }
+  return room.pairingToken;
+}
+
+function pairingQrPath(room, token) {
+  return `/api/sessions/${encodeURIComponent(room.id)}/glasses-qr.svg?pair=${encodeURIComponent(token)}`;
+}
+
+function pairingGlassesUrl(req, room, token) {
+  const url = new URL('/glasses', requestOrigin(req));
+  url.searchParams.set('room', room.id);
+  url.searchParams.set('pair', token);
+  return url.toString();
+}
+
+function pairingPayload(req, room) {
+  const token = ensurePairingToken(room);
+  return {
+    roomId: room.id,
+    glassesUrl: pairingGlassesUrl(req, room, token),
+    legacyGlassesUrl: absoluteRoomUrl(req, '/glasses', room.id),
+    qrSvgUrl: pairingQrPath(room, token),
+    expiresAt: new Date(room.pairingExpiresAt).toISOString(),
+    ttlMs: Math.max(0, room.pairingExpiresAt - Date.now()),
+  };
+}
+
+function validatePairingToken(room, token) {
+  if (!token) return { ok: true, legacy: true };
+  if (!normalizePairingToken(token)) {
+    return {
+      ok: false,
+      status: 400,
+      title: 'Invalid pairing link',
+      message: 'This glasses link is malformed. Use the QR code or copy link from the main conversation screen.',
+    };
+  }
+  if (!room) {
+    return {
+      ok: false,
+      status: 410,
+      title: 'Pairing link expired',
+      message: 'This glasses pairing link is no longer active. Start a new conversation on the main device and scan a fresh QR code.',
+    };
+  }
+  if (!room.pairingToken || token !== room.pairingToken) {
+    return {
+      ok: false,
+      status: 403,
+      title: 'Invalid pairing link',
+      message: 'This glasses link does not match the active conversation. Scan the QR code again from the main device.',
+    };
+  }
+  if (Date.now() >= room.pairingExpiresAt) {
+    return {
+      ok: false,
+      status: 410,
+      title: 'Pairing link expired',
+      message: 'This glasses pairing link has expired. Refresh the QR code on the main device and scan again.',
+    };
+  }
+  return { ok: true };
 }
 
 function roomFromHttpRequest(req) {
@@ -166,8 +302,18 @@ function roomFromHttpRequest(req) {
 }
 
 function sendRoomPage(req, res, pathname, filename) {
+  const hasRoomParam = Object.prototype.hasOwnProperty.call(req.query || {}, 'room');
   const roomId = roomFromHttpRequest(req);
   if (!roomId) {
+    if (hasRoomParam) {
+      sendRoomLinkError(
+        res,
+        400,
+        'Invalid room link',
+        'This room link is malformed. Start a fresh conversation and pair the glasses again.'
+      );
+      return;
+    }
     res.redirect(302, roomPath(pathname, createRoomId()));
     return;
   }
@@ -187,13 +333,63 @@ app.get('/speak', (req, res) => {
 // Programmatic room creation hook for future QR/pairing flows.
 app.get('/api/sessions/new', (req, res) => {
   const roomId = createRoomId();
+  const room = getRoom(roomId);
+  const pairing = pairingPayload(req, room);
+  releaseRoom(room);
   res.json({
     roomId,
     speakUrl: roomPath('/speak', roomId),
     glassesUrl: roomPath('/glasses', roomId),
+    pairingGlassesUrl: pairing.glassesUrl,
+    legacyGlassesUrl: pairing.legacyGlassesUrl,
+    qrSvgUrl: pairing.qrSvgUrl,
+    pairingExpiresAt: pairing.expiresAt,
     audioWsPath: `/ws/audio/${roomId}`,
     displayWsPath: `/ws/display/${roomId}`,
   });
+});
+
+app.get('/api/sessions/:roomId/pairing', (req, res) => {
+  const roomId = normalizeRoomId(req.params.roomId);
+  if (!roomId) return res.status(400).json({ error: 'A valid room id is required.' });
+
+  const room = getRoom(roomId);
+  const pairing = pairingPayload(req, room);
+  releaseRoom(room);
+  res.json(pairing);
+});
+
+app.get('/api/sessions/:roomId/glasses-qr.svg', async (req, res) => {
+  const roomId = normalizeRoomId(req.params.roomId);
+  if (!roomId) return res.status(400).type('text/plain').send('Invalid room id');
+
+  const token = normalizePairingToken(req.query?.pair);
+  if (!token) return res.status(400).type('text/plain').send('Invalid pairing token');
+  const room = rooms.get(roomId);
+  const validation = validatePairingToken(room, token);
+  if (!validation.ok) {
+    return res.status(validation.status).type('text/plain').send(validation.title);
+  }
+
+  try {
+    const svg = await QRCode.toString(pairingGlassesUrl(req, room, token), {
+      type: 'svg',
+      margin: 2,
+      width: 260,
+      color: {
+        dark: '#000000',
+        light: '#ffffff',
+      },
+    });
+    res
+      .status(200)
+      .type('image/svg+xml')
+      .set('Cache-Control', 'no-store')
+      .send(svg);
+  } catch (err) {
+    console.error('[Pairing] Failed to render QR:', err.message);
+    res.status(500).type('text/plain').send('QR unavailable');
+  }
 });
 
 async function probePoseServer() {
@@ -325,6 +521,39 @@ app.post('/api/demo/pose', async (req, res) => {
 // Glasses display page: the Meta Ray-Ban Display Web App URL. Use the same
 // room query param as /speak to pair the two clients.
 app.get('/glasses', (req, res) => {
+  const hasRoomParam = Object.prototype.hasOwnProperty.call(req.query || {}, 'room');
+  const hasPairParam = Object.prototype.hasOwnProperty.call(req.query || {}, 'pair');
+  const roomId = roomFromHttpRequest(req);
+  const token = normalizePairingToken(req.query?.pair);
+
+  if (hasPairParam && !hasRoomParam) {
+    sendRoomLinkError(
+      res,
+      400,
+      'Invalid pairing link',
+      'This glasses pairing link is missing its room. Start a fresh conversation and scan the QR code again.'
+    );
+    return;
+  }
+
+  if (hasPairParam && !token) {
+    sendRoomLinkError(
+      res,
+      400,
+      'Invalid pairing link',
+      'This glasses pairing link is malformed. Use the QR code or copy link from the main conversation screen.'
+    );
+    return;
+  }
+
+  if (hasRoomParam && roomId && hasPairParam) {
+    const validation = validatePairingToken(rooms.get(roomId), token);
+    if (!validation.ok) {
+      sendRoomLinkError(res, validation.status, validation.title, validation.message);
+      return;
+    }
+  }
+
   sendRoomPage(req, res, '/glasses', 'glasses.html');
 });
 
@@ -470,6 +699,7 @@ function parseWebSocketRequest(request) {
 
   let role = 'display';
   let roomId = '';
+  let clientType = 'display';
 
   if (parts[0] === 'ws' && (parts[1] === 'audio' || parts[1] === 'display')) {
     role = parts[1];
@@ -484,7 +714,15 @@ function parseWebSocketRequest(request) {
     roomId = normalizeRoomId(url.searchParams.get('room'));
   }
 
-  return { role, roomId };
+  if (role === 'display') {
+    const requestedType = String(url.searchParams.get('client') || '').trim().toLowerCase();
+    if (requestedType === 'glasses') clientType = 'glasses';
+    else if (requestedType === 'controller' || requestedType === 'main' || requestedType === 'speak') {
+      clientType = 'controller';
+    }
+  }
+
+  return { role, roomId, clientType };
 }
 
 function rejectWebSocket(ws, reason) {
@@ -546,6 +784,25 @@ function broadcastError(room, message, scope = 'service') {
   }));
 }
 
+function displayClientCount(room, clientType) {
+  let count = 0;
+  for (const client of room.displayClients) {
+    if (client.readyState === 1 && client.clientType === clientType) count++;
+  }
+  return count;
+}
+
+function broadcastPairingState(room) {
+  const glassesCount = displayClientCount(room, 'glasses');
+  broadcastToRoom(room, JSON.stringify({
+    type: 'pairing',
+    roomId: room.id,
+    glassesConnected: glassesCount > 0,
+    glassesCount,
+    displayClients: room.displayClients.size,
+  }));
+}
+
 function resetRoomPlayback(room) {
   room.poseGeneration += 1;
   for (const session of room.audioSessions) session.reset();
@@ -554,7 +811,7 @@ function resetRoomPlayback(room) {
 }
 
 wss.on('connection', (ws, request) => {
-  const { role, roomId } = parseWebSocketRequest(request);
+  const { role, roomId, clientType } = parseWebSocketRequest(request);
   if (!roomId) {
     rejectWebSocket(ws, 'A valid room id is required.');
     return;
@@ -563,11 +820,14 @@ wss.on('connection', (ws, request) => {
   const room = getRoom(roomId);
 
   if (role === 'display') {
+    ws.clientType = clientType;
     room.displayClients.add(ws);
-    console.log(`[Room ${room.id}] Display client connected (${room.displayClients.size} display client(s)).`);
+    console.log(`[Room ${room.id}] Display client connected as ${clientType} (${room.displayClients.size} display client(s)).`);
+    broadcastPairingState(room);
     ws.on('close', () => {
       room.displayClients.delete(ws);
       console.log(`[Room ${room.id}] Display client disconnected (${room.displayClients.size} display client(s)).`);
+      broadcastPairingState(room);
       releaseRoom(room);
     });
     ws.on('message', (message) => {

@@ -46,7 +46,7 @@
     }
     .mode-btn.active { color: #fff; background: #2471a3; border-color: #2471a3; }
 
-    .trust-strip, .service-notice, .pairing-row {
+    .trust-strip, .service-notice, .pairing-panel {
       border: 1px solid #2a2a2a;
       background: rgba(255,255,255,0.06);
       border-radius: 6px;
@@ -67,16 +67,133 @@
       overflow-wrap: anywhere;
     }
     .service-notice.visible { display: block; }
-    .pairing-row {
+    .pairing-panel {
       display: grid;
-      grid-template-columns: 1fr;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 8px;
+      gap: 10px;
+      padding: 10px;
       font-size: 12px;
+    }
+    .pairing-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+    }
+    .pairing-title {
+      color: #fff;
+      font-size: 14px;
+      font-weight: 800;
     }
     .room-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cfcfcf; }
     .room-meta code { color: #fff; }
+    .pairing-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 28px;
+      padding: 5px 8px;
+      border: 1px solid #444;
+      border-radius: 999px;
+      background: #181818;
+      color: #ddd;
+      white-space: nowrap;
+      font-weight: 700;
+    }
+    .pairing-state.connected {
+      color: #dfffe8;
+      border-color: rgba(46,204,113,0.65);
+      background: rgba(46,204,113,0.12);
+    }
+    .pairing-state.lost {
+      color: #ffe5e1;
+      border-color: rgba(231,76,60,0.65);
+      background: rgba(231,76,60,0.12);
+    }
+    .pair-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #ffe14d;
+      flex: 0 0 auto;
+    }
+    .pairing-state.connected .pair-dot { background: #2ecc71; }
+    .pairing-state.lost .pair-dot { background: #e74c3c; }
+    .pairing-body {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 10px;
+      align-items: stretch;
+    }
+    .qr-frame {
+      position: relative;
+      display: grid;
+      place-items: center;
+      width: 150px;
+      aspect-ratio: 1 / 1;
+      border-radius: 6px;
+      background: #fff;
+      border: 1px solid #333;
+      overflow: hidden;
+    }
+    .qr-frame img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .qr-placeholder {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 10px;
+      color: #111;
+      text-align: center;
+      font-weight: 700;
+      line-height: 1.25;
+      background: #fff;
+    }
+    .qr-placeholder.hidden { display: none; }
+    .pairing-copy {
+      display: grid;
+      gap: 7px;
+      align-content: start;
+      min-width: 0;
+    }
+    .pairing-instruction {
+      color: #eee;
+      line-height: 1.35;
+    }
+    .fallback-label {
+      color: #aaa;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .fallback-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px;
+      min-width: 0;
+    }
+    #glassesLinkInput {
+      min-width: 0;
+      width: 100%;
+      padding: 8px;
+      color: #fff;
+      background: #111;
+      border: 1px solid #444;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 12px;
+    }
+    .pairing-meta {
+      min-height: 1.25em;
+      color: #aaa;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
     .secondary-btn {
       padding: 8px 10px;
       font-size: 12px;
@@ -84,7 +201,6 @@
       border: 1px solid #555;
       border-radius: 6px;
       color: #fff;
-      width: 100%;
     }
 
     .demo-panel {
@@ -174,6 +290,18 @@
       .controls {
         grid-template-columns: 1fr;
       }
+      .pairing-header,
+      .pairing-body,
+      .fallback-row {
+        grid-template-columns: 1fr;
+      }
+      .qr-frame {
+        width: min(100%, 240px);
+        justify-self: center;
+      }
+      .pairing-state {
+        justify-self: start;
+      }
     }
   </style>
 </head>
@@ -187,10 +315,33 @@
   <div class="trust-strip">Private room · Live audio/camera only · AI-assisted, not certified interpretation</div>
   <div id="serviceNotice" class="service-notice" role="status" aria-live="polite"></div>
 
-  <div class="pairing-row">
-    <div class="room-meta">Room <code id="roomLabel"></code> · pair glasses with this session</div>
-    <button id="copyGlassesBtn" class="secondary-btn" type="button">Copy glasses link</button>
-  </div>
+  <section class="pairing-panel" aria-labelledby="pairingTitle">
+    <div class="pairing-header">
+      <div>
+        <div id="pairingTitle" class="pairing-title">Pair glasses</div>
+        <div class="room-meta">Room <code id="roomLabel"></code></div>
+      </div>
+      <div id="pairingState" class="pairing-state" role="status" aria-live="polite">
+        <span class="pair-dot" aria-hidden="true"></span>
+        <span id="pairingStatusText">Waiting for glasses</span>
+      </div>
+    </div>
+    <div class="pairing-body">
+      <div class="qr-frame">
+        <img id="pairingQr" alt="QR code for the glasses room link" />
+        <div id="qrPlaceholder" class="qr-placeholder">Loading QR</div>
+      </div>
+      <div class="pairing-copy">
+        <div id="pairingInstruction" class="pairing-instruction">Scan this code from the glasses to join this room.</div>
+        <div class="fallback-label">Manual fallback</div>
+        <div class="fallback-row">
+          <input id="glassesLinkInput" type="text" readonly aria-label="Manual glasses link" />
+          <button id="copyGlassesBtn" class="secondary-btn" type="button">Copy link</button>
+        </div>
+        <div id="pairingMeta" class="pairing-meta" role="status" aria-live="polite"></div>
+      </div>
+    </div>
+  </section>
 
   <div id="mode-bar" role="tablist" aria-label="Translation mode">
     <button id="speakModeBtn" class="mode-btn active" type="button" role="tab" aria-selected="true" aria-controls="speak-panel">Speak to Sign</button>
@@ -244,17 +395,30 @@ const dot        = document.getElementById('dot');
 const statusText = document.getElementById('status-text');
 const serviceNotice = document.getElementById('serviceNotice');
 const roomLabel = document.getElementById('roomLabel');
+const pairingState = document.getElementById('pairingState');
+const pairingStatusText = document.getElementById('pairingStatusText');
+const pairingInstruction = document.getElementById('pairingInstruction');
+const pairingQr = document.getElementById('pairingQr');
+const qrPlaceholder = document.getElementById('qrPlaceholder');
+const glassesLinkInput = document.getElementById('glassesLinkInput');
+const pairingMeta = document.getElementById('pairingMeta');
 const copyGlassesBtn = document.getElementById('copyGlassesBtn');
-const glassesUrl = `${location.origin}/glasses?room=${encodeURIComponent(roomId)}`;
+let glassesUrl = `${location.origin}/glasses?room=${encodeURIComponent(roomId)}`;
+let pairingHasConnected = false;
+let pairingExpiresAt = null;
 
 roomLabel.textContent = roomId.slice(0, 8);
+glassesLinkInput.value = glassesUrl;
 
 copyGlassesBtn.addEventListener('click', async () => {
   const original = copyGlassesBtn.textContent;
   try {
     await navigator.clipboard.writeText(glassesUrl);
     copyGlassesBtn.textContent = 'Copied';
+    glassesLinkInput.select();
   } catch (e) {
+    glassesLinkInput.focus();
+    glassesLinkInput.select();
     copyGlassesBtn.textContent = 'Copy failed';
   } finally {
     setTimeout(() => { copyGlassesBtn.textContent = original; }, 1600);
@@ -274,8 +438,92 @@ function setServiceNotice(messages) {
 
 function wsUrl(role) {
   const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${wsProto}://${location.host}/ws/${role}/${encodeURIComponent(roomId)}`;
+  const clientParam = role === 'display' ? '?client=controller' : '';
+  return `${wsProto}://${location.host}/ws/${role}/${encodeURIComponent(roomId)}${clientParam}`;
 }
+
+function setPairingState(state, text, instruction) {
+  pairingState.classList.toggle('connected', state === 'connected');
+  pairingState.classList.toggle('lost', state === 'lost');
+  pairingStatusText.textContent = text;
+  if (instruction) pairingInstruction.textContent = instruction;
+}
+
+function renderPairingPresence(glassesConnected) {
+  if (glassesConnected) {
+    pairingHasConnected = true;
+    setPairingState(
+      'connected',
+      'Glasses connected',
+      'You are paired. Start speaking here or on the glasses.'
+    );
+    return;
+  }
+
+  if (pairingHasConnected) {
+    setPairingState(
+      'lost',
+      'Connection lost',
+      'The glasses disconnected. Reopen the glasses page or scan the QR code again.'
+    );
+  } else {
+    setPairingState(
+      'waiting',
+      'Waiting for glasses',
+      'Scan this code from the glasses to join this room.'
+    );
+  }
+}
+
+function setQrPlaceholder(text, visible = true) {
+  qrPlaceholder.textContent = text;
+  qrPlaceholder.classList.toggle('hidden', !visible);
+}
+
+function updatePairingExpiry() {
+  if (!pairingExpiresAt) {
+    pairingMeta.textContent = '';
+    return;
+  }
+  const remainingMs = pairingExpiresAt.getTime() - Date.now();
+  if (remainingMs <= 0) {
+    pairingMeta.textContent = 'Pairing link expired. Reload this page for a fresh QR code.';
+    setQrPlaceholder('QR expired');
+    return;
+  }
+  const minutes = Math.max(1, Math.ceil(remainingMs / 60000));
+  pairingMeta.textContent = `QR link expires in ${minutes} min`;
+}
+
+async function loadPairingLink() {
+  setQrPlaceholder('Loading QR');
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(roomId)}/pairing`, { cache: 'no-store' });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+
+    glassesUrl = payload.glassesUrl || glassesUrl;
+    glassesLinkInput.value = glassesUrl;
+    pairingExpiresAt = payload.expiresAt ? new Date(payload.expiresAt) : null;
+
+    if (!payload.qrSvgUrl) throw new Error('QR URL missing');
+    pairingQr.onload = () => setQrPlaceholder('', false);
+    pairingQr.onerror = () => {
+      setQrPlaceholder('QR unavailable');
+      pairingMeta.textContent = 'Use the manual link fallback.';
+    };
+    const separator = payload.qrSvgUrl.includes('?') ? '&' : '?';
+    pairingQr.src = `${payload.qrSvgUrl}${separator}t=${Date.now()}`;
+    updatePairingExpiry();
+  } catch (e) {
+    console.error('[Pairing]', e);
+    setQrPlaceholder('QR unavailable');
+    pairingMeta.textContent = 'Use the manual link fallback.';
+  }
+}
+
+loadPairingLink();
+setInterval(updatePairingExpiry, 30000);
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  SPEAK → SIGN  (original mode, unchanged logic)
@@ -353,6 +601,7 @@ function handleDisplayMessage(event) {
     let msg; try { msg = JSON.parse(event.data); } catch (e) { return; }
     if (msg.type === 'transcript') transcriptEl.textContent = msg.text;
     else if (msg.type === 'reset') resetSigning(false);
+    else if (msg.type === 'pairing') renderPairingPresence(Boolean(msg.glassesConnected));
     else if (msg.type === 'error') {
       const text = msg.text || msg.error || 'Service unavailable.';
       setStatus('error', text);
@@ -373,9 +622,17 @@ function connectDisplay() {
   }
   displayWS = new WebSocket(wsUrl('display'));
   displayWS.binaryType = 'arraybuffer';
-  displayWS.onopen = () => setStatus('live', `Live · ${roomId.slice(0, 6)}`);
+  displayWS.onopen = () => {
+    setStatus('live', `Live · ${roomId.slice(0, 6)}`);
+    renderPairingPresence(false);
+  };
   displayWS.onclose = () => {
     setStatus('error', 'Reconnecting');
+    setPairingState(
+      'lost',
+      'Connection lost',
+      'Room connection dropped. Reconnecting to the pairing service.'
+    );
     displayReconnectTimer = setTimeout(connectDisplay, 1500);
   };
   displayWS.onerror = () => {
