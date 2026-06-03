@@ -28,6 +28,16 @@ const ROOM_ID_PATTERN = /^[a-zA-Z0-9_-]{6,80}$/;
 const PAIRING_TOKEN_PATTERN = /^[a-zA-Z0-9_-]{16,128}$/;
 const DEMO_POSE_ENABLED = process.env.DEMO_POSE_ENABLED !== '0';
 const ALLOW_CUSTOM_DEMO_POSE = process.env.ALLOW_CUSTOM_DEMO_POSE === '1';
+const METRIC_STAGES = Object.freeze([
+  'speech_transcription',
+  'gloss',
+  'pose_generation',
+  'avatar_playback_start',
+  'recognition',
+  'gloss_to_english',
+  'tts',
+]);
+const MAX_METRIC_DURATION_MS = 10 * 60 * 1000;
 
 const DEMO_PHRASES = Object.freeze([
   {
@@ -134,6 +144,173 @@ const GLOSS_SYSTEM_PROMPT =
 // Cache so repeated phrases ("hello", "thank you") cost nothing after the first.
 const glossCache = new Map();
 
+function metricTimestamp() {
+  return new Date().toISOString();
+}
+
+function emptyTimingBucket() {
+  return {
+    count: 0,
+    lastMs: null,
+    avgMs: null,
+    maxMs: null,
+    updatedAt: null,
+    status: 'idle',
+    route: null,
+    source: null,
+    pipelineId: null,
+  };
+}
+
+function createMetricsStore(scope) {
+  return {
+    scope,
+    startedAt: metricTimestamp(),
+    updatedAt: null,
+    eventsTotal: 0,
+    timings: Object.fromEntries(METRIC_STAGES.map((stage) => [stage, emptyTimingBucket()])),
+    failures: {
+      total: 0,
+      byCategory: {},
+    },
+    lastError: null,
+  };
+}
+
+const globalMetrics = createMetricsStore('app');
+
+function roundMetricMs(value) {
+  return Math.round(Number(value) * 10) / 10;
+}
+
+function clampMetricDurationMs(value) {
+  const duration = Number(value);
+  if (!Number.isFinite(duration) || duration < 0) return 0;
+  return Math.min(duration, MAX_METRIC_DURATION_MS);
+}
+
+function normalizeMetricToken(value, fallback = 'unknown') {
+  const token = String(value || fallback)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_:/.-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return (token || fallback).slice(0, 80);
+}
+
+function sanitizeMetricRoute(value) {
+  return value ? normalizeMetricToken(value, 'route') : null;
+}
+
+function sanitizePipelineId(value) {
+  const id = String(value || '').trim();
+  return /^[a-zA-Z0-9_-]{6,128}$/.test(id) ? id : null;
+}
+
+function createPipelineId() {
+  return randomUUID().replace(/-/g, '').slice(0, 16);
+}
+
+function updateTimingStore(store, event) {
+  const bucket = store.timings[event.stage];
+  if (!bucket) return;
+
+  const previousCount = bucket.count;
+  const previousAverage = bucket.avgMs || 0;
+  bucket.count += 1;
+  bucket.lastMs = event.durationMs;
+  bucket.avgMs = roundMetricMs(
+    previousCount > 0
+      ? ((previousAverage * previousCount) + event.durationMs) / bucket.count
+      : event.durationMs
+  );
+  bucket.maxMs = bucket.maxMs === null ? event.durationMs : Math.max(bucket.maxMs, event.durationMs);
+  bucket.updatedAt = event.at;
+  bucket.status = event.status;
+  bucket.route = event.route;
+  bucket.source = event.source;
+  bucket.pipelineId = event.pipelineId;
+  store.updatedAt = event.at;
+  store.eventsTotal += 1;
+}
+
+function updateFailureStore(store, event) {
+  store.failures.total += 1;
+  store.failures.byCategory[event.category] = (store.failures.byCategory[event.category] || 0) + 1;
+  store.lastError = event;
+  store.updatedAt = event.at;
+  store.eventsTotal += 1;
+}
+
+function latestTiming(store) {
+  return Object.entries(store.timings)
+    .filter(([, timing]) => timing.updatedAt)
+    .sort((a, b) => String(b[1].updatedAt).localeCompare(String(a[1].updatedAt)))[0]
+    ?.[1] || null;
+}
+
+function metricsSnapshot(store) {
+  return {
+    scope: store.scope,
+    startedAt: store.startedAt,
+    updatedAt: store.updatedAt,
+    eventsTotal: store.eventsTotal,
+    timings: Object.fromEntries(
+      Object.entries(store.timings).map(([stage, timing]) => [stage, { ...timing }])
+    ),
+    latestTiming: latestTiming(store),
+    failures: {
+      total: store.failures.total,
+      byCategory: { ...store.failures.byCategory },
+    },
+    lastError: store.lastError ? { ...store.lastError } : null,
+  };
+}
+
+function recordTiming(room, stage, durationMs, meta = {}) {
+  if (!METRIC_STAGES.includes(stage)) return null;
+  const event = {
+    kind: 'timing',
+    stage,
+    durationMs: roundMetricMs(clampMetricDurationMs(durationMs)),
+    status: normalizeMetricToken(meta.status || 'ok', 'ok'),
+    route: sanitizeMetricRoute(meta.route),
+    source: meta.source ? normalizeMetricToken(meta.source, 'source') : null,
+    pipelineId: sanitizePipelineId(meta.pipelineId),
+    at: metricTimestamp(),
+  };
+
+  updateTimingStore(globalMetrics, event);
+  if (room?.metrics) {
+    updateTimingStore(room.metrics, event);
+    if (meta.broadcast !== false) {
+      broadcastMetrics(room, { event });
+    }
+  }
+  return event;
+}
+
+function recordFailure(room, category, meta = {}) {
+  const event = {
+    kind: 'failure',
+    category: normalizeMetricToken(category, 'service_error'),
+    route: sanitizeMetricRoute(meta.route),
+    status: meta.status ? normalizeMetricToken(meta.status, 'error') : 'error',
+    source: meta.source ? normalizeMetricToken(meta.source, 'source') : null,
+    pipelineId: sanitizePipelineId(meta.pipelineId),
+    at: metricTimestamp(),
+  };
+
+  updateFailureStore(globalMetrics, event);
+  if (room?.metrics) {
+    updateFailureStore(room.metrics, event);
+    if (meta.broadcast !== false) {
+      broadcastMetrics(room, { event });
+    }
+  }
+  return event;
+}
+
 const DIGIT_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
 
 function expandDigitsForSigning(text) {
@@ -160,14 +337,26 @@ function findDemoPhrase({ phraseId, text }) {
   return DEMO_PHRASES.find((phrase) => normalizePhraseText(phrase.text) === normalized) || null;
 }
 
-async function englishToAslGloss(text) {
-  if (!openai) return text;
+async function englishToAslGlossResult(text) {
+  if (!openai) {
+    return {
+      gloss: text,
+      status: 'fallback_raw_text',
+      cacheHit: false,
+      errorCategory: null,
+    };
+  }
   const key = text.toLowerCase().trim();
   if (glossCache.has(key)) {
     const cached = glossCache.get(key);
     glossCache.delete(key);
     glossCache.set(key, cached);
-    return cached;
+    return {
+      gloss: cached,
+      status: 'cache',
+      cacheHit: true,
+      errorCategory: null,
+    };
   }
   try {
     const completion = await openai.chat.completions.create({
@@ -187,11 +376,25 @@ async function englishToAslGloss(text) {
         glossCache.delete(glossCache.keys().next().value);
       }
     }
-    return result;
+    return {
+      gloss: result,
+      status: 'ok',
+      cacheHit: false,
+      errorCategory: null,
+    };
   } catch (err) {
-    console.error('[Gloss] OpenAI failed, using raw text:', err.message);
-    return text; // graceful fallback — never block the avatar on the API
+    console.error('[Gloss] OpenAI failed, using raw text fallback:', err.name || 'error');
+    return {
+      gloss: text,
+      status: 'fallback_raw_text',
+      cacheHit: false,
+      errorCategory: 'openai_gloss_failed',
+    }; // graceful fallback — never block the avatar on the API
   }
+}
+
+async function englishToAslGloss(text) {
+  return (await englishToAslGlossResult(text)).gloss;
 }
 
 const app = express();
@@ -201,6 +404,72 @@ app.use(express.json({ limit: '5mb' }));
 // Room-local state. A room represents one private conversation. All transcripts,
 // pose blobs, and control messages stay inside its display client set.
 const rooms = new Map();
+
+function roomForMetrics(roomId) {
+  const normalized = normalizeRoomId(roomId);
+  return normalized ? rooms.get(normalized) || null : null;
+}
+
+function roomStatusSnapshot(room, requestedRoomId = '') {
+  const roomId = room?.id || normalizeRoomId(requestedRoomId);
+  if (!room) {
+    return {
+      roomId,
+      active: false,
+      clients: {
+        display: 0,
+        controller: 0,
+        glasses: 0,
+        glassesConnected: false,
+        audio: 0,
+      },
+      metrics: null,
+    };
+  }
+
+  const glasses = displayClientCount(room, 'glasses');
+  return {
+    roomId: room.id,
+    active: true,
+    createdAt: new Date(room.createdAt).toISOString(),
+    lastActivityAt: new Date(room.lastActivityAt).toISOString(),
+    clients: {
+      display: room.displayClients.size,
+      controller: displayClientCount(room, 'controller'),
+      glasses,
+      glassesConnected: glasses > 0,
+      audio: room.audioSessions.size,
+    },
+    failures: {
+      total: room.metrics.failures.total,
+      byCategory: { ...room.metrics.failures.byCategory },
+    },
+    lastError: room.metrics.lastError ? { ...room.metrics.lastError } : null,
+    metrics: metricsSnapshot(room.metrics),
+  };
+}
+
+function roomsAggregateSnapshot() {
+  let displayClients = 0;
+  let audioSessions = 0;
+  let glassesConnected = 0;
+  let roomsWithFailures = 0;
+
+  for (const room of rooms.values()) {
+    displayClients += room.displayClients.size;
+    audioSessions += room.audioSessions.size;
+    if (displayClientCount(room, 'glasses') > 0) glassesConnected += 1;
+    if (room.metrics.failures.total > 0) roomsWithFailures += 1;
+  }
+
+  return {
+    active: rooms.size,
+    displayClients,
+    audioSessions,
+    glassesConnected,
+    withFailures: roomsWithFailures,
+  };
+}
 
 function createRoomId() {
   return randomUUID().replace(/-/g, '');
@@ -445,18 +714,23 @@ app.get('/api/sessions/:roomId/glasses-qr.svg', async (req, res) => {
 async function probePoseServer() {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 1200);
+  const startedAt = performance.now();
   try {
     const response = await fetch(`${POSE_SERVER_URL}/health`, { signal: controller.signal });
     return {
       configured: true,
       reachable: response.ok,
       status: response.ok ? 'ok' : `http_${response.status}`,
+      latencyMs: roundMetricMs(performance.now() - startedAt),
+      checkedAt: metricTimestamp(),
     };
   } catch (err) {
     return {
       configured: true,
       reachable: false,
       status: err.name === 'AbortError' ? 'timeout' : 'unreachable',
+      latencyMs: roundMetricMs(performance.now() - startedAt),
+      checkedAt: metricTimestamp(),
     };
   } finally {
     clearTimeout(timeout);
@@ -464,8 +738,12 @@ async function probePoseServer() {
 }
 
 app.get('/api/health', async (req, res) => {
+  const roomId = normalizeRoomId(req.query?.room);
+  const room = roomId ? rooms.get(roomId) : null;
+  const pose = await probePoseServer();
   res.json({
     status: 'ok',
+    checkedAt: metricTimestamp(),
     services: {
       deepgram: {
         configured: Boolean(DEEPGRAM_API_KEY),
@@ -479,15 +757,27 @@ app.get('/api/health', async (req, res) => {
         configured: Boolean(ELEVENLABS_API_KEY),
         status: ELEVENLABS_API_KEY ? 'configured' : 'visual_only',
       },
-      pose: await probePoseServer(),
+      pose,
       demo: {
         configured: DEMO_POSE_ENABLED,
         status: DEMO_POSE_ENABLED ? 'available' : 'disabled',
         phraseCount: DEMO_PHRASES.length,
       },
     },
-    rooms: {
-      active: rooms.size,
+    rooms: roomsAggregateSnapshot(),
+    room: roomId ? roomStatusSnapshot(room, roomId) : null,
+    metrics: metricsSnapshot(globalMetrics),
+    privacy: {
+      rawAudioStored: false,
+      rawVideoStored: false,
+      fullConversationsStoredByDefault: false,
+      storedFields: [
+        'technical timing',
+        'service status',
+        'route',
+        'room id/session id',
+        'error category',
+      ],
     },
   });
 });
@@ -527,9 +817,27 @@ app.post('/api/demo/pose', async (req, res) => {
   const room = getRoom(roomId);
   const generation = room.poseGeneration;
   const signableText = expandDigitsForSigning(phrase.text);
+  const pipelineId = createPipelineId();
 
   try {
-    const gloss = expandDigitsForSigning(await englishToAslGloss(signableText));
+    const glossStartedAt = performance.now();
+    const glossResult = await englishToAslGlossResult(signableText);
+    const gloss = expandDigitsForSigning(glossResult.gloss);
+    recordTiming(room, 'gloss', performance.now() - glossStartedAt, {
+      route: '/api/demo/pose',
+      source: 'demo',
+      status: glossResult.status,
+      pipelineId,
+    });
+    if (glossResult.errorCategory) {
+      recordFailure(room, glossResult.errorCategory, {
+        route: '/api/demo/pose',
+        source: 'demo',
+        status: glossResult.status,
+        pipelineId,
+      });
+    }
+
     broadcastToRoom(room, JSON.stringify({
       type: 'transcript',
       roomId: room.id,
@@ -538,15 +846,27 @@ app.post('/api/demo/pose', async (req, res) => {
       is_final: true,
     }));
 
-    const arrayBuffer = await generatePose(gloss);
-    if (!arrayBuffer) {
+    const poseResult = await generatePose(gloss);
+    recordTiming(room, 'pose_generation', poseResult.durationMs, {
+      route: '/api/demo/pose',
+      source: 'demo',
+      status: poseResult.status,
+      pipelineId,
+    });
+
+    if (!poseResult.ok) {
       const message = 'Demo signing is unavailable. Make sure the Python pose server is running.';
-      broadcastError(room, message, 'pose');
+      broadcastError(room, message, 'pose', poseResult.errorCategory, {
+        route: '/api/demo/pose',
+        source: 'demo',
+        pipelineId,
+        status: poseResult.status,
+      });
       return res.status(503).json({ error: message });
     }
 
     if (generation === room.poseGeneration) {
-      broadcastToRoom(room, Buffer.from(arrayBuffer));
+      broadcastToRoom(room, Buffer.from(poseResult.arrayBuffer));
     }
 
     return res.json({
@@ -559,9 +879,13 @@ app.post('/api/demo/pose', async (req, res) => {
       discarded: generation !== room.poseGeneration,
     });
   } catch (err) {
-    console.error('[Demo] pose generation failed:', err.message);
+    console.error('[Demo] pose generation failed:', err.name || 'error');
     const message = 'Demo signing failed.';
-    broadcastError(room, message, 'pose');
+    broadcastError(room, message, 'pose', 'demo_pose_error', {
+      route: '/api/demo/pose',
+      source: 'demo',
+      pipelineId,
+    });
     return res.status(500).json({ error: message });
   } finally {
     releaseRoom(room);
@@ -629,25 +953,74 @@ app.get('/icon.png', (req, res) => {
 
 // Proxy landmark frames to the Python recognizer
 app.post('/api/recognize', async (req, res) => {
+  const room = roomForMetrics(req.body?.roomId || req.query?.room);
+  const startedAt = performance.now();
+  const frames = req.body?.frames;
+  if (!Array.isArray(frames)) {
+    recordFailure(room, 'recognition_invalid_request', {
+      route: '/api/recognize',
+      source: 'browser',
+      status: 'bad_request',
+    });
+    return res.status(400).json({ error: 'frames required' });
+  }
+
   try {
     const r = await fetch(`${POSE_SERVER_URL}/recognize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body),
+      body: JSON.stringify({ frames }),
     });
-    if (!r.ok) return res.status(r.status).json({ error: 'Recognition failed' });
+    recordTiming(room, 'recognition', performance.now() - startedAt, {
+      route: '/api/recognize',
+      source: 'pose_server',
+      status: r.ok ? 'ok' : `http_${r.status}`,
+    });
+    if (!r.ok) {
+      recordFailure(room, 'recognition_http_error', {
+        route: '/api/recognize',
+        source: 'pose_server',
+        status: `http_${r.status}`,
+      });
+      return res.status(r.status).json({ error: 'Recognition failed' });
+    }
     res.json(await r.json());
   } catch (err) {
-    console.error('[Recognize]', err.message);
+    recordTiming(room, 'recognition', performance.now() - startedAt, {
+      route: '/api/recognize',
+      source: 'pose_server',
+      status: 'error',
+    });
+    recordFailure(room, 'recognition_unreachable', {
+      route: '/api/recognize',
+      source: 'pose_server',
+    });
+    console.error('[Recognize]', err.name || 'error');
     res.status(500).json({ error: err.message });
   }
 });
 
 // Convert ASL gloss to natural English via OpenAI
 app.post('/api/gloss-to-english', async (req, res) => {
+  const room = roomForMetrics(req.body?.roomId || req.query?.room);
+  const startedAt = performance.now();
   const { gloss } = req.body || {};
-  if (!gloss) return res.status(400).json({ error: 'gloss required' });
-  if (!openai) return res.json({ text: gloss }); // graceful fallback
+  if (!gloss) {
+    recordFailure(room, 'gloss_to_english_invalid_request', {
+      route: '/api/gloss-to-english',
+      source: 'browser',
+      status: 'bad_request',
+    });
+    return res.status(400).json({ error: 'gloss required' });
+  }
+  if (!openai) {
+    recordTiming(room, 'gloss_to_english', performance.now() - startedAt, {
+      route: '/api/gloss-to-english',
+      source: 'openai',
+      status: 'fallback_raw_gloss',
+    });
+    return res.json({ text: gloss }); // graceful fallback
+  }
 
   try {
     const completion = await openai.chat.completions.create({
@@ -659,18 +1032,48 @@ app.post('/api/gloss-to-english', async (req, res) => {
         { role: 'user', content: gloss },
       ],
     });
+    recordTiming(room, 'gloss_to_english', performance.now() - startedAt, {
+      route: '/api/gloss-to-english',
+      source: 'openai',
+      status: 'ok',
+    });
     res.json({ text: completion.choices[0].message.content.trim() });
   } catch (err) {
-    console.error('[Gloss→EN]', err.message);
+    recordTiming(room, 'gloss_to_english', performance.now() - startedAt, {
+      route: '/api/gloss-to-english',
+      source: 'openai',
+      status: 'fallback_raw_gloss',
+    });
+    recordFailure(room, 'openai_gloss_to_english_failed', {
+      route: '/api/gloss-to-english',
+      source: 'openai',
+    });
+    console.error('[Gloss->EN]', err.name || 'error');
     res.json({ text: gloss }); // return raw gloss on failure
   }
 });
 
 // ElevenLabs TTS proxy — keeps the API key server-side
 app.post('/api/tts', async (req, res) => {
+  const room = roomForMetrics(req.body?.roomId || req.query?.room);
+  const startedAt = performance.now();
   const { text } = req.body || {};
-  if (!text) return res.status(400).json({ error: 'text required' });
-  if (!ELEVENLABS_API_KEY) return res.status(503).json({ error: 'ELEVENLABS_API_KEY not configured' });
+  if (!text) {
+    recordFailure(room, 'tts_invalid_request', {
+      route: '/api/tts',
+      source: 'browser',
+      status: 'bad_request',
+    });
+    return res.status(400).json({ error: 'text required' });
+  }
+  if (!ELEVENLABS_API_KEY) {
+    recordFailure(room, 'tts_missing_key', {
+      route: '/api/tts',
+      source: 'elevenlabs',
+      status: 'missing_key',
+    });
+    return res.status(503).json({ error: 'ELEVENLABS_API_KEY not configured' });
+  }
 
   try {
     const r = await fetch(
@@ -689,14 +1092,45 @@ app.post('/api/tts', async (req, res) => {
       }
     );
     if (!r.ok) {
-      const errText = await r.text();
-      console.error('[TTS] ElevenLabs error:', errText);
+      recordTiming(room, 'tts', performance.now() - startedAt, {
+        route: '/api/tts',
+        source: 'elevenlabs',
+        status: `http_${r.status}`,
+      });
+      recordFailure(room, 'tts_http_error', {
+        route: '/api/tts',
+        source: 'elevenlabs',
+        status: `http_${r.status}`,
+      });
+      console.error(`[TTS] ElevenLabs error status=${r.status}`);
       return res.status(500).json({ error: 'TTS request failed' });
     }
     res.set('Content-Type', 'audio/mpeg');
+    res.on('finish', () => {
+      recordTiming(room, 'tts', performance.now() - startedAt, {
+        route: '/api/tts',
+        source: 'elevenlabs',
+        status: 'ok',
+      });
+    });
+    r.body.on('error', () => {
+      recordFailure(room, 'tts_stream_error', {
+        route: '/api/tts',
+        source: 'elevenlabs',
+      });
+    });
     r.body.pipe(res);
   } catch (err) {
-    console.error('[TTS]', err.message);
+    recordTiming(room, 'tts', performance.now() - startedAt, {
+      route: '/api/tts',
+      source: 'elevenlabs',
+      status: 'error',
+    });
+    recordFailure(room, 'tts_unreachable', {
+      route: '/api/tts',
+      source: 'elevenlabs',
+    });
+    console.error('[TTS]', err.name || 'error');
     res.status(500).json({ error: err.message });
   }
 });
@@ -715,6 +1149,7 @@ function getRoom(roomId) {
       cleanupTimer: null,
       createdAt: Date.now(),
       lastActivityAt: Date.now(),
+      metrics: createMetricsStore(`room:${roomId}`),
     };
     rooms.set(roomId, room);
     console.log(`[Room ${roomId}] created (${rooms.size} active room(s)).`);
@@ -789,10 +1224,12 @@ function rejectWebSocket(ws, reason) {
 }
 
 // Ask the Python server to turn text into a .pose binary. Returns an
-// ArrayBuffer, or null on failure (caller should skip the broadcast).
+// ArrayBuffer plus technical status, or an error category on failure. The text
+// itself is intentionally not included in the metric payload.
 async function generatePose(text) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), POSE_TIMEOUT_MS);
+  const startedAt = performance.now();
   try {
     const res = await fetch(`${POSE_SERVER_URL}/pose`, {
       method: 'POST',
@@ -800,17 +1237,36 @@ async function generatePose(text) {
       body: JSON.stringify({ text }),
       signal: controller.signal,
     });
+    const durationMs = performance.now() - startedAt;
     if (!res.ok) {
       console.error(`[Pose] Python server error: ${res.status}`);
-      return null;
+      return {
+        ok: false,
+        arrayBuffer: null,
+        durationMs,
+        status: `http_${res.status}`,
+        errorCategory: 'pose_http_error',
+      };
     }
-    return await res.arrayBuffer();
+    return {
+      ok: true,
+      arrayBuffer: await res.arrayBuffer(),
+      durationMs,
+      status: 'ok',
+      errorCategory: null,
+    };
   } catch (err) {
     const message = err.name === 'AbortError'
       ? `Timed out after ${POSE_TIMEOUT_MS}ms`
       : err.message;
     console.error('[Pose] Failed to reach Python server:', message);
-    return null;
+    return {
+      ok: false,
+      arrayBuffer: null,
+      durationMs: performance.now() - startedAt,
+      status: err.name === 'AbortError' ? 'timeout' : 'unreachable',
+      errorCategory: err.name === 'AbortError' ? 'pose_timeout' : 'pose_unreachable',
+    };
   } finally {
     clearTimeout(timeout);
   }
@@ -825,7 +1281,23 @@ function broadcastToRoom(room, data) {
   }
 }
 
-function broadcastError(room, message, scope = 'service') {
+function broadcastMetrics(room, payload = {}) {
+  if (!room?.metrics || room.displayClients.size === 0) return;
+  broadcastToRoom(room, JSON.stringify({
+    type: 'metrics',
+    roomId: room.id,
+    ...payload,
+    metrics: metricsSnapshot(room.metrics),
+  }));
+}
+
+function broadcastError(room, message, scope = 'service', category = scope, meta = {}) {
+  recordFailure(room, category, {
+    route: meta.route || 'websocket',
+    source: meta.source || scope,
+    status: meta.status || 'error',
+    pipelineId: meta.pipelineId,
+  });
   broadcastToRoom(room, JSON.stringify({
     type: 'error',
     roomId: room.id,
@@ -851,6 +1323,18 @@ function broadcastPairingState(room) {
     glassesCount,
     displayClients: room.displayClients.size,
   }));
+}
+
+function handleClientMetric(room, msg, clientType) {
+  const eventName = normalizeMetricToken(msg.event || msg.stage, '');
+  if (eventName !== 'avatar_playback_start') return;
+
+  recordTiming(room, 'avatar_playback_start', msg.durationMs, {
+    route: '/ws/display',
+    source: clientType,
+    status: msg.status || 'ok',
+    pipelineId: msg.pipelineId,
+  });
 }
 
 function resetRoomPlayback(room) {
@@ -884,6 +1368,7 @@ wss.on('connection', (ws, request) => {
       try {
         const msg = JSON.parse(message.toString());
         if (msg.type === 'reset') resetRoomPlayback(room);
+        else if (msg.type === 'metrics') handleClientMetric(room, msg, clientType);
       } catch {
         // Display clients only send small JSON control messages.
       }
@@ -894,7 +1379,11 @@ wss.on('connection', (ws, request) => {
   console.log(`[Room ${room.id}] Audio client connected — opening Deepgram live session.`);
   if (!deepgram) {
     const message = 'Speech recognition is not configured. Set DEEPGRAM_API_KEY to use Speak to Sign.';
-    broadcastError(room, message, 'speech');
+    broadcastError(room, message, 'speech', 'deepgram_missing_key', {
+      route: '/ws/audio',
+      source: 'deepgram',
+      status: 'missing_key',
+    });
     rejectWebSocket(ws, message);
     releaseRoom(room);
     return;
@@ -907,12 +1396,14 @@ wss.on('connection', (ws, request) => {
   const MAX_BUFFERED_WORDS = 16;
   let wordBuffer = [];
   let finalFlushTimer = null;
+  let speechSegmentStartedAt = null;
   // Serialize gloss+pose generation per connection so clips are broadcast in order.
   let poseChain = Promise.resolve();
 
   const session = {
     reset() {
       wordBuffer = [];
+      speechSegmentStartedAt = null;
       if (finalFlushTimer) {
         clearTimeout(finalFlushTimer);
         finalFlushTimer = null;
@@ -924,19 +1415,54 @@ wss.on('connection', (ws, request) => {
 
   function enqueuePose(text) {
     const generation = room.poseGeneration;
+    const pipelineId = createPipelineId();
     poseChain = poseChain
       .then(async () => {
         const signableText = expandDigitsForSigning(text);
-        const gloss = expandDigitsForSigning(await englishToAslGloss(signableText));
-        if (gloss !== text) console.log(`[Gloss] "${text}" -> "${gloss}"`);
-        const arrayBuffer = await generatePose(gloss);
-        if (arrayBuffer && generation === room.poseGeneration) {
-          broadcastToRoom(room, Buffer.from(arrayBuffer));
+        const glossStartedAt = performance.now();
+        const glossResult = await englishToAslGlossResult(signableText);
+        const gloss = expandDigitsForSigning(glossResult.gloss);
+        recordTiming(room, 'gloss', performance.now() - glossStartedAt, {
+          route: '/ws/audio',
+          source: 'speech',
+          status: glossResult.status,
+          pipelineId,
+        });
+        if (glossResult.errorCategory) {
+          recordFailure(room, glossResult.errorCategory, {
+            route: '/ws/audio',
+            source: 'speech',
+            status: glossResult.status,
+            pipelineId,
+          });
+        }
+
+        const poseResult = await generatePose(gloss);
+        recordTiming(room, 'pose_generation', poseResult.durationMs, {
+          route: '/ws/audio',
+          source: 'speech',
+          status: poseResult.status,
+          pipelineId,
+        });
+        if (poseResult.ok && generation === room.poseGeneration) {
+          broadcastToRoom(room, Buffer.from(poseResult.arrayBuffer));
         } else if (generation === room.poseGeneration) {
-          broadcastError(room, 'Signing service is unavailable. Make sure the Python pose server is running.', 'pose');
+          broadcastError(room, 'Signing service is unavailable. Make sure the Python pose server is running.', 'pose', poseResult.errorCategory, {
+            route: '/ws/audio',
+            source: 'speech',
+            pipelineId,
+            status: poseResult.status,
+          });
         }
       })
-      .catch((err) => console.error('[Pose] generation error:', err));
+      .catch((err) => {
+        recordFailure(room, 'pose_pipeline_error', {
+          route: '/ws/audio',
+          source: 'speech',
+          pipelineId,
+        });
+        console.error('[Pose] generation error:', err.name || 'error');
+      });
   }
 
   function flushUtterance() {
@@ -946,6 +1472,7 @@ wss.on('connection', (ws, request) => {
     }
     if (wordBuffer.length > 0) {
       enqueuePose(wordBuffer.splice(0).join(' '));
+      speechSegmentStartedAt = null;
     }
   }
 
@@ -986,6 +1513,14 @@ wss.on('connection', (ws, request) => {
       // Only finalized words feed the pose pipeline (interim words can change).
       if (!data.is_final) return;
 
+      if (speechSegmentStartedAt !== null) {
+        recordTiming(room, 'speech_transcription', performance.now() - speechSegmentStartedAt, {
+          route: '/ws/audio',
+          source: 'deepgram',
+          status: data.speech_final ? 'speech_final' : 'final',
+        });
+      }
+
       const signableTranscript = expandDigitsForSigning(transcript);
       const words = signableTranscript.trim().split(/\s+/).filter(Boolean);
       if (words.length) wordBuffer.push(...words);
@@ -1001,20 +1536,26 @@ wss.on('connection', (ws, request) => {
     });
 
     dgLive.on(LiveTranscriptionEvents.Error, (err) => {
-      console.error('Deepgram error:', err);
-      broadcastError(room, 'Speech recognition error. Check Deepgram credentials and network access.', 'speech');
+      console.error('Deepgram error:', err.name || 'error');
+      broadcastError(room, 'Speech recognition error. Check Deepgram credentials and network access.', 'speech', 'deepgram_error', {
+        route: '/ws/audio',
+        source: 'deepgram',
+      });
     });
 
     dgLive.on(LiveTranscriptionEvents.Close, () => {
       console.log('Deepgram connection closed.');
     });
   } catch (err) {
-    console.error('Failed to open Deepgram live session:', err);
+    console.error('Failed to open Deepgram live session:', err.name || 'error');
   }
 
   if (!dgLive) {
     const message = 'Could not open the speech recognition connection.';
-    broadcastError(room, message, 'speech');
+    broadcastError(room, message, 'speech', 'deepgram_open_failed', {
+      route: '/ws/audio',
+      source: 'deepgram',
+    });
     room.audioSessions.delete(session);
     rejectWebSocket(ws, message);
     releaseRoom(room);
@@ -1024,10 +1565,15 @@ wss.on('connection', (ws, request) => {
   ws.on('message', (chunk) => {
     try {
       if (dgLive && dgLive.getReadyState() === 1) {
+        if (speechSegmentStartedAt === null) speechSegmentStartedAt = performance.now();
         dgLive.send(chunk);
       }
     } catch (err) {
-      console.error('Error forwarding audio to Deepgram:', err);
+      recordFailure(room, 'speech_forward_error', {
+        route: '/ws/audio',
+        source: 'deepgram',
+      });
+      console.error('Error forwarding audio to Deepgram:', err.name || 'error');
     }
   });
 
@@ -1039,13 +1585,21 @@ wss.on('connection', (ws, request) => {
     try {
       if (dgLive) dgLive.finish();
     } catch (err) {
-      console.error('Error finishing Deepgram session:', err);
+      recordFailure(room, 'deepgram_finish_error', {
+        route: '/ws/audio',
+        source: 'deepgram',
+      });
+      console.error('Error finishing Deepgram session:', err.name || 'error');
     }
     releaseRoom(room);
   });
 
   ws.on('error', (err) => {
-    console.error('Audio WebSocket error:', err);
+    recordFailure(room, 'audio_websocket_error', {
+      route: '/ws/audio',
+      source: 'browser',
+    });
+    console.error('Audio WebSocket error:', err.name || 'error');
   });
 });
 

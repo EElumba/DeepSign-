@@ -113,15 +113,22 @@
     let playing = false;
     let watchdog = null;
     let displayWS = null;
+    let pendingPoseMetric = null;
     const WATCHDOG_MS = 30000;
 
     function enqueuePose(blob) {
-      poseQueue.push(URL.createObjectURL(blob));
+      const entry = {
+        url: URL.createObjectURL(blob),
+        receivedAt: performance.now(),
+        pipelineId: pendingPoseMetric?.pipelineId || null,
+      };
+      pendingPoseMetric = null;
+      poseQueue.push(entry);
       if (!playing) playNext();
     }
 
     function clearPoseQueue() {
-      while (poseQueue.length) URL.revokeObjectURL(poseQueue.shift());
+      while (poseQueue.length) URL.revokeObjectURL(poseQueue.shift().url);
     }
 
     function playNext() {
@@ -135,12 +142,14 @@
       }
 
       playing = true;
-      const url = poseQueue.shift();
+      const entry = poseQueue.shift();
+      const url = entry.url;
       currentUrl = url;
 
       const apply = () => {
         signer.src = url;
         try { if (typeof signer.play === 'function') signer.play(); } catch (e) {}
+        sendDisplayMetric('avatar_playback_start', performance.now() - entry.receivedAt, entry.pipelineId);
         watchdog = setTimeout(playNext, WATCHDOG_MS);
       };
       if (window.customElements && customElements.whenDefined) {
@@ -165,6 +174,21 @@
       transcriptEl.textContent = '';
       if (notifyServer && displayWS && displayWS.readyState === WebSocket.OPEN) {
         displayWS.send(JSON.stringify({ type: 'reset' }));
+      }
+    }
+
+    function sendDisplayMetric(event, durationMs, pipelineId = null) {
+      if (!displayWS || displayWS.readyState !== WebSocket.OPEN) return;
+      try {
+        displayWS.send(JSON.stringify({
+          type: 'metrics',
+          event,
+          durationMs,
+          pipelineId,
+          status: 'ok',
+        }));
+      } catch (e) {
+        // Metrics are best-effort developer telemetry.
       }
     }
 
@@ -200,6 +224,13 @@
             transcriptEl.textContent = msg.text;
           } else if (msg.type === 'reset') {
             resetSigning(false);
+          } else if (msg.type === 'metrics') {
+            if (msg.event?.kind === 'timing'
+                && msg.event.stage === 'pose_generation'
+                && msg.event.status === 'ok'
+                && msg.event.pipelineId) {
+              pendingPoseMetric = { pipelineId: msg.event.pipelineId };
+            }
           } else if (msg.type === 'error') {
             const text = msg.text || msg.error || 'Service unavailable.';
             setStatus('error', 'Service issue');

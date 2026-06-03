@@ -65,6 +65,10 @@ async function main() {
   assertEqual(initialHealth.services?.pose?.reachable, true, 'app health pose reachable');
   assertEqual(initialHealth.services?.pose?.status, 'ok', 'app health pose status');
   assertEqual(initialHealth.services?.demo?.status, 'available', 'app health demo status');
+  assertEqual(initialHealth.privacy?.rawAudioStored, false, 'app health raw audio privacy');
+  assertEqual(initialHealth.privacy?.rawVideoStored, false, 'app health raw video privacy');
+  assertEqual(initialHealth.privacy?.fullConversationsStoredByDefault, false, 'app health conversation privacy');
+  assertEqual(typeof initialHealth.metrics?.timings?.pose_generation?.count, 'number', 'app health metrics pose bucket');
   pass('health endpoints report real service state', summarizeHealth(initialHealth));
 
   const poseHealth = await getJson(`${poseUrl}/health`);
@@ -99,6 +103,14 @@ async function main() {
     const pendingPose = waitForEvent(displaySocket, 'binary .pose on glasses display', (event) => (
       event.kind === 'binary' && event.bytes > 0
     ), config.eventTimeoutMs);
+    const pendingPoseMetric = waitForEvent(displaySocket, 'pose generation metric on glasses display', (event) => (
+      event.kind === 'json'
+      && event.data.type === 'metrics'
+      && event.data.event?.kind === 'timing'
+      && event.data.event?.stage === 'pose_generation'
+      && event.data.event?.status === 'ok'
+      && Number.isFinite(Number(event.data.event?.durationMs))
+    ), config.eventTimeoutMs);
 
     const demoResponse = await postJson(`${appUrl}/api/demo/pose`, {
       roomId: session.roomId,
@@ -113,14 +125,31 @@ async function main() {
 
     const transcriptEvent = await pendingTranscript;
     const poseEvent = await pendingPose;
+    const poseMetricEvent = await pendingPoseMetric;
     pass('glasses display received transcript', transcriptEvent.data.text);
     pass('glasses display received avatar/sign output', `${poseEvent.bytes} bytes`);
+    pass('glasses display received pose timing metric', `${poseMetricEvent.data.event.durationMs}ms`);
 
-    const finalHealth = await getJson(`${appUrl}/api/health`);
+    displaySocket.send(JSON.stringify({
+      type: 'metrics',
+      event: 'avatar_playback_start',
+      durationMs: 12,
+      pipelineId: poseMetricEvent.data.event.pipelineId,
+      status: 'ok',
+    }));
+
+    const finalHealth = await waitForCheck('room metrics include demo timings', async () => {
+      const health = await getJson(`${appUrl}/api/health?room=${encodeURIComponent(session.roomId)}`);
+      assertAtLeast(health.room?.metrics?.timings?.gloss?.count, 1, 'room gloss timing count');
+      assertAtLeast(health.room?.metrics?.timings?.pose_generation?.count, 1, 'room pose timing count');
+      assertAtLeast(health.room?.metrics?.timings?.avatar_playback_start?.count, 1, 'room avatar start timing count');
+      return health;
+    }, 10000);
     assertEqual(finalHealth.services?.pose?.reachable, true, 'final app health pose reachable');
     assertEqual(finalHealth.services?.pose?.status, 'ok', 'final app health pose status');
     assertEqual(finalHealth.services?.demo?.status, 'available', 'final app health demo status');
     assertAtLeast(finalHealth.rooms?.active, 1, 'final active rooms');
+    assertEqual(finalHealth.room?.clients?.glassesConnected, true, 'final room glasses connected');
     pass('post-run health/status is consistent', summarizeHealth(finalHealth));
   } finally {
     displaySocket.close();

@@ -156,6 +156,9 @@
       font-size: 11px;
       font-weight: 800;
       white-space: nowrap;
+      max-width: 138px;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .status-note {
       padding: 8px 10px 10px;
@@ -472,9 +475,9 @@
     </div>
   </section>
 
-  <details id="demoStatusDrawer" class="demo-status-drawer" open>
+  <details id="demoStatusDrawer" class="demo-status-drawer">
     <summary>
-      <span>Demo readiness</span>
+      <span>Demo status</span>
       <span id="demoReadinessSummary" class="summary-pill">Checking</span>
     </summary>
     <div id="demoChecklist" class="status-list" role="list"></div>
@@ -600,6 +603,18 @@ const demoState = {
     value: 'Idle',
     detail: 'Waiting for speech or a demo phrase.',
   },
+  latency: {
+    label: 'Pipeline latency',
+    state: 'idle',
+    value: 'No data',
+    detail: 'Waiting for the first timed pipeline stage.',
+  },
+  error: {
+    label: 'Last pipeline error',
+    state: 'ok',
+    value: 'None',
+    detail: 'No room-level pipeline failures recorded.',
+  },
 };
 let micPermissionGranted = false;
 
@@ -657,6 +672,58 @@ function renderDemoChecklist() {
 function setDemoState(key, patch) {
   Object.assign(demoState[key], patch);
   renderDemoChecklist();
+}
+
+const METRIC_STAGE_LABELS = {
+  speech_transcription: 'Speech transcription',
+  gloss: 'Text-to-sign gloss',
+  pose_generation: 'Pose generation',
+  avatar_playback_start: 'Avatar start',
+  recognition: 'Recognition',
+  gloss_to_english: 'Gloss-to-English',
+  tts: 'TTS',
+};
+
+function formatLatency(ms) {
+  const value = Number(ms);
+  if (!Number.isFinite(value)) return 'No data';
+  if (value < 1000) return `${Math.round(value)} ms`;
+  return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)} s`;
+}
+
+function latestTimingFromSnapshot(metrics) {
+  const timings = metrics?.timings || {};
+  return Object.entries(timings)
+    .filter(([, timing]) => Number.isFinite(Number(timing.lastMs)) && timing.updatedAt)
+    .sort((a, b) => String(b[1].updatedAt).localeCompare(String(a[1].updatedAt)))[0] || null;
+}
+
+function applyMetricsSnapshot(metrics, roomSnapshot = null) {
+  const latest = latestTimingFromSnapshot(metrics);
+  if (latest) {
+    const [stage, timing] = latest;
+    const label = METRIC_STAGE_LABELS[stage] || stage.replaceAll('_', ' ');
+    setDemoState('latency', {
+      state: timing.status === 'ok' || timing.status === 'cache' ? 'ok' : 'warn',
+      value: formatLatency(timing.lastMs),
+      detail: `${label} - avg ${formatLatency(timing.avgMs)} over ${timing.count}`,
+    });
+  }
+
+  const lastError = roomSnapshot?.lastError || metrics?.lastError;
+  if (lastError) {
+    setDemoState('error', {
+      state: 'bad',
+      value: lastError.category || 'Error',
+      detail: `${lastError.route || 'pipeline'} - ${lastError.status || 'error'}`,
+    });
+  } else {
+    setDemoState('error', {
+      state: 'ok',
+      value: 'None',
+      detail: 'No room-level pipeline failures recorded.',
+    });
+  }
 }
 
 async function refreshMicPermissionStatus() {
@@ -844,11 +911,18 @@ let watchdog    = null;
 let displayWS   = null;
 let demoBusy    = false;
 let poseServiceReachable = true;
+let pendingPoseMetric = null;
 const WATCHDOG_MS = 30000;
 const HEALTH_POLL_MS = 15000;
 
 function enqueuePose(blob) {
-  poseQueue.push(URL.createObjectURL(blob));
+  const entry = {
+    url: URL.createObjectURL(blob),
+    receivedAt: performance.now(),
+    pipelineId: pendingPoseMetric?.pipelineId || null,
+  };
+  pendingPoseMetric = null;
+  poseQueue.push(entry);
   setDemoState('avatar', {
     state: playing ? 'ok' : 'pending',
     value: playing ? `Queued (${poseQueue.length})` : 'Loading',
@@ -858,7 +932,7 @@ function enqueuePose(blob) {
 }
 
 function clearPoseQueue() {
-  while (poseQueue.length) URL.revokeObjectURL(poseQueue.shift());
+  while (poseQueue.length) URL.revokeObjectURL(poseQueue.shift().url);
 }
 
 function playNext() {
@@ -875,11 +949,13 @@ function playNext() {
     return;
   }
   playing = true;
-  currentUrl = poseQueue.shift();
-  const url = currentUrl;
+  const entry = poseQueue.shift();
+  currentUrl = entry.url;
+  const url = entry.url;
   const apply = () => {
     signer.src = url;
     try { if (typeof signer.play === 'function') signer.play(); } catch (e) {}
+    sendDisplayMetric('avatar_playback_start', performance.now() - entry.receivedAt, entry.pipelineId);
     setDemoState('avatar', {
       state: 'ok',
       value: poseQueue.length ? `Playing + ${poseQueue.length}` : 'Playing',
@@ -916,6 +992,21 @@ function resetSigning(notifyServer = true) {
   }
 }
 
+function sendDisplayMetric(event, durationMs, pipelineId = null) {
+  if (!displayWS || displayWS.readyState !== WebSocket.OPEN) return;
+  try {
+    displayWS.send(JSON.stringify({
+      type: 'metrics',
+      event,
+      durationMs,
+      pipelineId,
+      status: 'ok',
+    }));
+  } catch (e) {
+    // Metrics are best-effort developer telemetry.
+  }
+}
+
 signer.addEventListener('ended$', () => playNext());
 
 function handleDisplayMessage(event) {
@@ -929,6 +1020,15 @@ function handleDisplayMessage(event) {
     if (msg.type === 'transcript') transcriptEl.textContent = msg.text;
     else if (msg.type === 'reset') resetSigning(false);
     else if (msg.type === 'pairing') renderPairingPresence(Boolean(msg.glassesConnected));
+    else if (msg.type === 'metrics') {
+      applyMetricsSnapshot(msg.metrics);
+      if (msg.event?.kind === 'timing'
+          && msg.event.stage === 'pose_generation'
+          && msg.event.status === 'ok'
+          && msg.event.pipelineId) {
+        pendingPoseMetric = { pipelineId: msg.event.pipelineId };
+      }
+    }
     else if (msg.type === 'error') {
       const text = msg.text || msg.error || 'Service unavailable.';
       setStatus('error', text);
@@ -1093,19 +1193,21 @@ let micProcessor = null;
 
 async function loadServiceHealth() {
   try {
-    const response = await fetch('/api/health', { cache: 'no-store' });
+    const response = await fetch(`/api/health?room=${encodeURIComponent(roomId)}`, { cache: 'no-store' });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const health = await response.json();
     const services = health.services || {};
+    const roomSnapshot = health.room || null;
     const issues = [];
     poseServiceReachable = Boolean(services.pose?.reachable);
     setDemoState('pose', {
       state: poseServiceReachable ? 'ok' : 'bad',
       value: poseServiceReachable ? 'Online' : 'Offline',
       detail: poseServiceReachable
-        ? 'Python signing service is reachable.'
+        ? `Python signing service is reachable (${formatLatency(services.pose?.latencyMs)}).`
         : `Python signing service is ${services.pose?.status || 'unreachable'}.`,
     });
+    applyMetricsSnapshot(roomSnapshot?.metrics || health.metrics, roomSnapshot);
 
     const speechConfigured = Boolean(services.deepgram?.configured);
     setDemoState('speech', {
@@ -1469,7 +1571,7 @@ async function flushSignBuffer() {
     const r = await fetch('/api/recognize', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ frames }),
+      body: JSON.stringify({ roomId, frames }),
     });
     if (!r.ok) throw new Error(r.statusText);
     const { gloss, confidence } = await r.json();
@@ -1502,7 +1604,7 @@ async function flushGlossesToEnglish() {
     const geRes = await fetch('/api/gloss-to-english', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ gloss }),
+      body: JSON.stringify({ roomId, gloss }),
     });
     const { text } = await geRes.json();
     englishOutput.textContent = text;
@@ -1520,7 +1622,7 @@ async function speakText(text) {
     const r = await fetch('/api/tts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ roomId, text }),
     });
     if (!r.ok) { console.warn('[TTS] server error', r.status); return; }
     const blob = await r.blob();
