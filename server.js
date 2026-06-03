@@ -23,6 +23,15 @@ const FINAL_FLUSH_DELAY_MS = Number(process.env.FINAL_FLUSH_DELAY_MS || 120);
 const POSE_TIMEOUT_MS = Number(process.env.POSE_TIMEOUT_MS || 30000);
 const ROOM_IDLE_TTL_MS = Number(process.env.ROOM_IDLE_TTL_MS || 60000);
 const ROOM_ID_PATTERN = /^[a-zA-Z0-9_-]{6,80}$/;
+const DEMO_POSE_ENABLED = process.env.DEMO_POSE_ENABLED !== '0';
+const ALLOW_CUSTOM_DEMO_POSE = process.env.ALLOW_CUSTOM_DEMO_POSE === '1';
+
+const DEMO_PHRASES = Object.freeze([
+  { id: 'hello', label: 'Hello', text: 'hello nice meet you' },
+  { id: 'help', label: 'Need help', text: 'please help me' },
+  { id: 'family', label: 'Family', text: 'my family learn sign' },
+  { id: 'yes-no', label: 'Yes / no', text: 'yes no' },
+]);
 
 const deepgram = DEEPGRAM_API_KEY ? createClient(DEEPGRAM_API_KEY) : null;
 
@@ -81,6 +90,21 @@ function expandDigitsForSigning(text) {
       .map((digit) => DIGIT_WORDS[Number(digit)])
       .join(' ')
   ));
+}
+
+function normalizePhraseText(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function findDemoPhrase({ phraseId, text }) {
+  if (phraseId) {
+    const byId = DEMO_PHRASES.find((phrase) => phrase.id === String(phraseId));
+    if (byId) return byId;
+  }
+
+  const normalized = normalizePhraseText(text);
+  if (!normalized) return null;
+  return DEMO_PHRASES.find((phrase) => normalizePhraseText(phrase.text) === normalized) || null;
 }
 
 async function englishToAslGloss(text) {
@@ -210,11 +234,92 @@ app.get('/api/health', async (req, res) => {
         status: ELEVENLABS_API_KEY ? 'configured' : 'visual_only',
       },
       pose: await probePoseServer(),
+      demo: {
+        configured: DEMO_POSE_ENABLED,
+        status: DEMO_POSE_ENABLED ? 'available' : 'disabled',
+        phraseCount: DEMO_PHRASES.length,
+      },
     },
     rooms: {
       active: rooms.size,
     },
   });
+});
+
+app.get('/api/demo/phrases', (req, res) => {
+  res.json({
+    enabled: DEMO_POSE_ENABLED,
+    allowCustom: ALLOW_CUSTOM_DEMO_POSE,
+    phrases: DEMO_POSE_ENABLED ? DEMO_PHRASES : [],
+  });
+});
+
+app.post('/api/demo/pose', async (req, res) => {
+  if (!DEMO_POSE_ENABLED) {
+    return res.status(404).json({ error: 'Demo pose generation is disabled.' });
+  }
+
+  const roomId = normalizeRoomId(req.body?.roomId || req.query?.room);
+  if (!roomId) return res.status(400).json({ error: 'A valid roomId is required.' });
+
+  let phrase = findDemoPhrase({
+    phraseId: req.body?.phraseId,
+    text: req.body?.text,
+  });
+
+  if (!phrase && ALLOW_CUSTOM_DEMO_POSE) {
+    const text = String(req.body?.text || '').trim().replace(/\s+/g, ' ');
+    if (text.length > 0 && text.length <= 120) {
+      phrase = { id: 'custom', label: 'Custom', text };
+    }
+  }
+
+  if (!phrase) {
+    return res.status(400).json({ error: 'Choose one of the available demo phrases.' });
+  }
+
+  const room = getRoom(roomId);
+  const generation = room.poseGeneration;
+  const signableText = expandDigitsForSigning(phrase.text);
+
+  try {
+    const gloss = expandDigitsForSigning(await englishToAslGloss(signableText));
+    broadcastToRoom(room, JSON.stringify({
+      type: 'transcript',
+      roomId: room.id,
+      source: 'demo',
+      text: phrase.text,
+      is_final: true,
+    }));
+
+    const arrayBuffer = await generatePose(gloss);
+    if (!arrayBuffer) {
+      const message = 'Demo signing is unavailable. Make sure the Python pose server is running.';
+      broadcastError(room, message, 'pose');
+      return res.status(503).json({ error: message });
+    }
+
+    if (generation === room.poseGeneration) {
+      broadcastToRoom(room, Buffer.from(arrayBuffer));
+    }
+
+    return res.json({
+      ok: true,
+      roomId: room.id,
+      phraseId: phrase.id,
+      text: phrase.text,
+      gloss,
+      displayClients: room.displayClients.size,
+      discarded: generation !== room.poseGeneration,
+    });
+  } catch (err) {
+    console.error('[Demo] pose generation failed:', err.message);
+    const message = 'Demo signing failed.';
+    broadcastError(room, message, 'pose');
+    return res.status(500).json({ error: message });
+  } finally {
+    releaseRoom(room);
+  }
 });
 
 // Glasses display page: the Meta Ray-Ban Display Web App URL. Use the same

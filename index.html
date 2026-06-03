@@ -27,7 +27,7 @@
       display: flex; flex-direction: column; align-items: stretch;
     }
     .wrap {
-      width: min(100%, 560px); max-width: 100vw; padding: 12px;
+      width: 100%; max-width: 560px; padding: 12px;
       min-width: 0;
       margin: 0 auto;
       display: flex; flex-direction: column; gap: 10px;
@@ -87,6 +87,40 @@
       width: 100%;
     }
 
+    .demo-panel {
+      display: grid;
+      gap: 5px;
+      min-width: 0;
+    }
+    .demo-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      min-width: 0;
+    }
+    .demo-btn {
+      padding: 8px 6px;
+      font-size: 12px;
+      line-height: 1.2;
+      background: #202020;
+      border: 1px solid #444;
+      border-radius: 6px;
+      color: #f5f5f5;
+      min-height: 38px;
+    }
+    .demo-btn:focus-visible {
+      outline: 3px solid #ffe14d;
+      outline-offset: 2px;
+    }
+    #demoStatus {
+      min-height: 1.3em;
+      font-size: 11px;
+      color: #bbb;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
     .info-line {
       font-size: 13px; line-height: 1.4; min-height: 2.5em; max-height: 2.5em;
       overflow: hidden;
@@ -133,6 +167,14 @@
       outline: 3px solid #ffe14d;
       outline-offset: 2px;
     }
+
+    @media (max-width: 430px) {
+      #mode-bar,
+      .demo-grid,
+      .controls {
+        grid-template-columns: 1fr;
+      }
+    }
   </style>
 </head>
 <body>
@@ -158,6 +200,10 @@
   <!-- SPEAK to SIGN panel -->
   <section id="speak-panel" role="tabpanel" aria-labelledby="speakModeBtn" style="display:flex; flex-direction:column; gap:10px;">
     <div id="transcript" class="info-line" role="log" aria-live="polite" aria-label="Speech transcript"></div>
+    <div class="demo-panel" aria-label="Demo phrases">
+      <div id="demoPhrases" class="demo-grid"></div>
+      <div id="demoStatus" role="status" aria-live="polite"></div>
+    </div>
     <pose-viewer id="signer" autoplay role="img" aria-label="Animated signing avatar"></pose-viewer>
     <div class="controls">
       <button id="micBtn" type="button">Start</button>
@@ -238,12 +284,16 @@ const transcriptEl = document.getElementById('transcript');
 const signer       = document.getElementById('signer');
 const resetBtn     = document.getElementById('resetBtn');
 const micBtn       = document.getElementById('micBtn');
+const demoPhrasesEl = document.getElementById('demoPhrases');
+const demoStatusEl = document.getElementById('demoStatus');
 
 const poseQueue = [];
 let currentUrl  = null;
 let playing     = false;
 let watchdog    = null;
 let displayWS   = null;
+let demoBusy    = false;
+let poseServiceReachable = true;
 const WATCHDOG_MS = 30000;
 
 function enqueuePose(blob) {
@@ -285,6 +335,7 @@ function resetSigning(notifyServer = true) {
   playing = false;
   stopSigning();
   transcriptEl.textContent = '';
+  demoStatusEl.textContent = '';
   if (notifyServer && displayWS && displayWS.readyState === WebSocket.OPEN) {
     displayWS.send(JSON.stringify({ type: 'reset' }));
   }
@@ -335,6 +386,68 @@ function connectDisplay() {
 
 connectDisplay();
 
+function refreshDemoButtons() {
+  const disabled = demoBusy || !poseServiceReachable;
+  demoPhrasesEl.querySelectorAll('button').forEach((button) => {
+    button.disabled = disabled;
+  });
+}
+
+function renderDemoPhrases(phrases) {
+  demoPhrasesEl.textContent = '';
+  phrases.forEach((phrase) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'demo-btn';
+    button.textContent = phrase.label;
+    button.addEventListener('click', () => playDemoPhrase(phrase));
+    demoPhrasesEl.appendChild(button);
+  });
+  refreshDemoButtons();
+}
+
+async function loadDemoPhrases() {
+  try {
+    const response = await fetch('/api/demo/phrases', { cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const { enabled, phrases } = await response.json();
+    renderDemoPhrases(enabled ? (phrases || []) : []);
+  } catch (e) {
+    demoStatusEl.textContent = 'Demo phrases unavailable.';
+  }
+}
+
+async function playDemoPhrase(phrase) {
+  if (demoBusy) return;
+  if (!poseServiceReachable) {
+    demoStatusEl.textContent = 'Pose server offline.';
+    return;
+  }
+
+  demoBusy = true;
+  refreshDemoButtons();
+  demoStatusEl.textContent = `Signing ${phrase.label}...`;
+
+  try {
+    const response = await fetch('/api/demo/pose', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ roomId, phraseId: phrase.id }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    transcriptEl.textContent = payload.text || phrase.text;
+    demoStatusEl.textContent = payload.gloss ? `Gloss ${payload.gloss}` : 'Sent to display.';
+  } catch (e) {
+    console.error('[Demo]', e);
+    setStatus('error', 'Demo unavailable');
+    demoStatusEl.textContent = e.message || 'Demo unavailable.';
+  } finally {
+    demoBusy = false;
+    refreshDemoButtons();
+  }
+}
+
 let recording    = false;
 let micStream    = null;
 let micWs        = null;
@@ -349,6 +462,7 @@ async function loadServiceHealth() {
     const health = await response.json();
     const services = health.services || {};
     const issues = [];
+    poseServiceReachable = Boolean(services.pose?.reachable);
 
     if (!services.deepgram?.configured) {
       issues.push('Speech input unavailable until DEEPGRAM_API_KEY is configured.');
@@ -357,7 +471,7 @@ async function loadServiceHealth() {
       micBtn.textContent = 'Speech unavailable';
       micBtn.title = 'Set DEEPGRAM_API_KEY on the server to enable Speak to Sign.';
     }
-    if (!services.pose?.reachable) {
+    if (!poseServiceReachable) {
       issues.push('Signing avatar service is offline; start the Python pose server.');
     }
     if (!services.openai?.configured) {
@@ -368,12 +482,14 @@ async function loadServiceHealth() {
     }
 
     setServiceNotice(issues);
+    refreshDemoButtons();
   } catch (e) {
     setServiceNotice(['Service health could not be checked.']);
   }
 }
 
 loadServiceHealth();
+loadDemoPhrases();
 
 async function startMic() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {

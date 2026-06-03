@@ -44,6 +44,11 @@ A single-page HTML/JS app. No framework, no build step. The UI has:
 6. Phrases are queued so the avatar signs them in order
 7. Transcript text (from Deepgram) is shown above the avatar in real time
 
+Hackathon/demo fallback: the panel also renders curated no-mic phrase buttons
+from `/api/demo/phrases`. Clicking a phrase posts to `/api/demo/pose`, generates
+a pose via the Python server, and broadcasts transcript + pose to all display
+clients in the same room, including paired glasses.
+
 ### Sign → Speak Panel
 
 1. User clicks "Start Camera" → browser opens webcam at 640×480
@@ -132,6 +137,8 @@ Pose generation is **serialized per audio connection** via a promise chain so cl
 | `GET` | `/glasses?room=<id>` | Serves `glasses.html` for the requested room |
 | `GET` | `/api/sessions/new` | Returns a fresh room ID and matching client URLs |
 | `GET` | `/api/health` | Reports configured services and pose-server reachability |
+| `GET` | `/api/demo/phrases` | Returns the curated no-mic phrase list |
+| `POST` | `/api/demo/pose` | Generates a demo pose and broadcasts it to a private room |
 | `POST` | `/api/recognize` | Proxies landmark frames to Python `/recognize` |
 | `POST` | `/api/gloss-to-english` | Calls OpenAI to convert ASL gloss → natural English |
 | `POST` | `/api/tts` | Proxies text to ElevenLabs TTS; streams MP3 audio back |
@@ -270,6 +277,16 @@ Microphone (browser)
   → Python /pose (text_to_gloss_to_pose CLI + postprocessing)
   → .pose binary (WebSocket /ws/display/<room-id>)
   → <pose-viewer> web component (skeleton avatar animation)
+```
+
+### Speak → Sign (demo path)
+
+```
+Curated phrase button
+  → POST /api/demo/pose with roomId + phraseId
+  → optional OpenAI gloss fallback to raw phrase
+  → Python /pose
+  → transcript JSON + .pose binary broadcast to /ws/display/<room-id>
 ```
 
 ### Sign → Speak (full path)

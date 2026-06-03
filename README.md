@@ -58,6 +58,12 @@ Visit `/api/health` to see which services are configured and whether the Python
 pose server is reachable. Speak→Sign requires `DEEPGRAM_API_KEY`; OpenAI glossing
 and ElevenLabs speech output fall back gracefully when unset.
 
+For demos, the companion `/speak` page includes curated no-mic phrase buttons.
+Clicking one posts to `/api/demo/pose`, generates a pose through the Python
+server, and broadcasts it to every display client in the same private room
+(including `/glasses`). Set `DEMO_POSE_ENABLED=0` to hide this path after the
+hackathon.
+
 ## Run — two terminals required
 
 **Terminal 1 — Python pose server:**
