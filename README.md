@@ -81,6 +81,60 @@ Wait for: `Application startup complete.` (the first request is pre-warmed on st
 npm start
 ```
 
+## Real-service smoke test
+
+Run the end-to-end smoke test when you want a quick confidence check that the
+real Python pose server, `/speak`, `/glasses`, room WebSockets, demo signing, and
+health reporting still work together:
+
+```bash
+npm run smoke:e2e
+```
+
+The script starts a real FastAPI pose server on `127.0.0.1:8130` and a real
+Express frontend on `127.0.0.1:3130`, then:
+
+- waits for `GET /health` on the Python server
+- waits for `GET /api/health` on the frontend and confirms the pose service is reachable
+- creates a private room through `GET /api/sessions/new`
+- loads the matching `/speak?room=<id>` and `/glasses?room=<id>` pages
+- joins `/ws/display/<room-id>?client=glasses`
+- posts the curated demo phrase to `/api/demo/pose`, the same no-mic path used by `/speak`
+- passes only if the glasses display WebSocket receives both the final transcript JSON and a non-empty binary `.pose` blob
+
+No raw audio or video is captured or stored. The smoke test uses the demo phrase
+path specifically so it can exercise the signing pipeline without microphone or
+camera permissions.
+
+If you already have both services running, reuse them instead of letting the
+script start new processes:
+
+```bash
+SMOKE_REUSE_SERVICES=1 \
+SMOKE_APP_URL=http://127.0.0.1:3000 \
+SMOKE_POSE_URL=http://127.0.0.1:8000 \
+npm run smoke:e2e
+```
+
+Useful overrides:
+
+```bash
+SMOKE_APP_PORT=3131 npm run smoke:e2e
+SMOKE_POSE_PORT=8131 npm run smoke:e2e
+SMOKE_PYTHON=python/.venv/bin/python npm run smoke:e2e
+SMOKE_PHRASE_ID=family npm run smoke:e2e
+```
+
+If the test fails before the Python server becomes ready, install the Python
+dependencies first:
+
+```bash
+cd python
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+cd ..
+```
+
 ## Session rooms
 
 Every conversation now runs in an isolated room. A room ID is carried in the URL

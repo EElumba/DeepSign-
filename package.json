@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "smoke:e2e": "node scripts/smoke-real-e2e.mjs"
   },
   "dependencies": {
     "@deepgram/sdk": "^3",
