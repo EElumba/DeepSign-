@@ -61,8 +61,12 @@ clients in the same room, including paired glasses.
    - Final still frames are kept so end holds remain part of the sign
    - Buffer is force-flushed after 120 frames (~4 seconds)
 5. The buffered frames (each as `{left_hand, right_hand}` 21×3 arrays) are POSTed to `/api/recognize`
-6. If confidence ≥ 0.45, the recognized gloss word is appended to a running list
-7. After 2.5 seconds of silence (no new glosses), the accumulated ASL gloss is:
+6. If confidence ≥ 0.45, the recognized gloss is shown as a removable word chip
+   with confidence when available
+7. Users can remove a chip, undo the removal, or choose a better top-5 candidate
+   from the recognizer before confirming the phrase
+8. After 2.5 seconds of silence (no new glosses), or when the user clicks "Use Phrase",
+   the accumulated ASL gloss is:
    - Translated to natural English via `/api/gloss-to-english` (OpenAI)
    - Spoken aloud via `/api/tts` (ElevenLabs TTS)
 
@@ -175,7 +179,11 @@ After the CLI generates a pose, a **postprocessing pipeline** runs:
 - Adds normalized left/right wrist trajectory and hand visibility signals
 - Runs a fast cosine-similarity pass against all lexicon means to shortlist candidates
 - Reranks the top candidates with banded DTW over the temporal templates
-- Returns `{"gloss": "word", "confidence": 0.xx, "mean_confidence": 0.xx, "temporal_confidence": 0.xx}`
+- Returns the winning gloss plus optional top-5 reranked candidates:
+  `{"gloss": "word", "confidence": 0.xx, "mean_confidence": 0.xx, "temporal_confidence": 0.xx, "candidates": [{"gloss": "word", "confidence": 0.xx, "mean_confidence": 0.xx, "temporal_confidence": 0.xx}]}`
+- The browser also accepts future-compatible candidate field names such as
+  `alternatives`, `top_candidates`, or `top5`, and candidate labels named
+  `gloss`, `word`, `label`, `text`, or `value`.
 
 #### `GET /health`
 - Returns `{"status": "ok"}`

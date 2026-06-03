@@ -770,6 +770,8 @@ app.get('/api/health', async (req, res) => {
     privacy: {
       rawAudioStored: false,
       rawVideoStored: false,
+      correctionDataStoredByDefault: false,
+      correctionLoggingOptInOnly: true,
       fullConversationsStoredByDefault: false,
       storedFields: [
         'technical timing',

@@ -15,6 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from lexicon_resolution import GlossResolver
+
 PORT = int(os.environ.get("PORT", "8000"))
 
 # Playback speed multiplier for the signing avatar. pose-viewer animates at the
@@ -127,6 +129,18 @@ def _lexicon_has_usable_entries(directory: str) -> bool:
 
 
 LEXICON_DIR = _resolve_lexicon_dir()
+LEXICON_ALIAS_FILE = os.environ.get("LEXICON_ALIAS_FILE") or os.path.join(LEXICON_DIR, "aliases.json")
+
+
+def _load_gloss_resolver() -> GlossResolver:
+    try:
+        return GlossResolver.from_paths(LEXICON_DIR, LEXICON_ALIAS_FILE)
+    except Exception as e:
+        print(f"[Startup] Ignoring unusable alias file {LEXICON_ALIAS_FILE}: {e}")
+        return GlossResolver.from_paths(LEXICON_DIR, None)
+
+
+GLOSS_RESOLVER = _load_gloss_resolver()
 
 
 def _resolve_cli() -> str:
@@ -423,6 +437,16 @@ def _load_lexicon_features() -> None:
     )
 
 
+def _resolve_pose_text(text: str) -> str:
+    resolved_text, resolutions = GLOSS_RESOLVER.resolve_text(text)
+    changed = resolved_text != text.strip().lower()
+    aliased = [item for item in resolutions if item.method in ("alias", "variant", "exact")]
+    if changed and aliased:
+        preview = ", ".join(f"{item.source}->{item.target}" for item in aliased[:6])
+        print(f"[Gloss] Resolved before fingerspelling: {preview}")
+    return resolved_text
+
+
 def generate_pose(text: str, retries: int = 2) -> bytes:
     """Run the `text_to_gloss_to_pose` CLI and return the raw .pose bytes.
 
@@ -434,7 +458,8 @@ def generate_pose(text: str, retries: int = 2) -> bytes:
     transient — a retry reliably succeeds — so we retry a couple of times
     before giving up.
     """
-    cached = _cache_get(text)
+    resolved_text = _resolve_pose_text(text)
+    cached = _cache_get(resolved_text)
     if cached is not None:
         return cached
 
@@ -446,7 +471,7 @@ def generate_pose(text: str, retries: int = 2) -> bytes:
             result = subprocess.run(
                 [
                     CLI,
-                    "--text", text,
+                    "--text", resolved_text,
                     "--glosser", "simple",
                     "--spoken-language", "en",
                     "--signed-language", "ase",
@@ -461,7 +486,7 @@ def generate_pose(text: str, retries: int = 2) -> bytes:
                 raise RuntimeError(f"text_to_gloss_to_pose failed: {result.stderr}")
             with open(out_path, "rb") as f:
                 pose_bytes = _postprocess_pose(f.read())
-            _cache_set(text, pose_bytes)
+            _cache_set(resolved_text, pose_bytes)
             return pose_bytes
         except Exception as e:
             last_err = e
@@ -746,6 +771,10 @@ async def startup():
     print(f"[Startup] ASL Pose Server listening on port {PORT}")
     print(f"[Startup] text_to_gloss_to_pose CLI: {CLI}")
     print(f"[Startup] Lexicon dir: {LEXICON_DIR}")
+    print(
+        f"[Startup] Gloss resolver: {len(GLOSS_RESOLVER.lexicon_glosses)} gloss(es), "
+        f"{len(GLOSS_RESOLVER.aliases)} alias(es) from {LEXICON_ALIAS_FILE}"
+    )
     try:
         generate_pose("hello")
         print("[Warmup] Pose model ready")
@@ -793,12 +822,7 @@ def recognize_sign(req: RecognizeRequest):
         return {"gloss": "", "confidence": 0.0}
 
     candidates.sort(key=lambda item: item[0], reverse=True)
-    best = {
-        "gloss": "",
-        "score": -1.0,
-        "mean_score": -1.0,
-        "temporal_score": -1.0,
-    }
+    reranked = []
 
     for mean_score, gloss, ref in candidates[:RECOGNIZE_TOP_K]:
         temporal_score = _temporal_similarity(query_sequence, ref["sequence"])
@@ -806,19 +830,27 @@ def recognize_sign(req: RecognizeRequest):
             (1.0 - RECOGNIZE_TEMPORAL_WEIGHT) * mean_score
             + RECOGNIZE_TEMPORAL_WEIGHT * temporal_score
         )
-        if combined_score > best["score"]:
-            best = {
-                "gloss": gloss,
-                "score": combined_score,
-                "mean_score": mean_score,
-                "temporal_score": temporal_score,
-            }
+        reranked.append({
+            "gloss": gloss,
+            "confidence": round(float(combined_score), 4),
+            "mean_confidence": round(float(mean_score), 4),
+            "temporal_confidence": round(float(temporal_score), 4),
+        })
+
+    reranked.sort(key=lambda item: item["confidence"], reverse=True)
+    best = reranked[0] if reranked else {
+        "gloss": "",
+        "confidence": 0.0,
+        "mean_confidence": 0.0,
+        "temporal_confidence": 0.0,
+    }
 
     return {
         "gloss": best["gloss"],
-        "confidence": round(float(best["score"]), 4),
-        "mean_confidence": round(float(best["mean_score"]), 4),
-        "temporal_confidence": round(float(best["temporal_score"]), 4),
+        "confidence": best["confidence"],
+        "mean_confidence": best["mean_confidence"],
+        "temporal_confidence": best["temporal_confidence"],
+        "candidates": reranked[:5],
         "candidates_considered": min(RECOGNIZE_TOP_K, len(candidates)),
     }
 

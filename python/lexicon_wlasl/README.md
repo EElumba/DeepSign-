@@ -20,3 +20,35 @@ Current generated set:
 - Generated from the most-recorded and highest-priority available WLASL glosses,
   with a focus on common communication, family, food, school/work, health, time,
   questions, and conversation-repair vocabulary
+
+## Quality and Alias Tooling
+
+Runtime gloss lookup uses `aliases.json` before falling back to fingerspelling.
+The alias file is a JSON object keyed by user vocabulary or phrase:
+
+```json
+{
+  "version": 1,
+  "aliases": {
+    "mom": "mother",
+    "dad": "father",
+    "hi": "hello",
+    "bye": "goodbye"
+  }
+}
+```
+
+Useful maintenance commands from the repository root:
+
+```bash
+python/.venv/bin/python python/lexicon_tools.py weakest --limit 25
+python/.venv/bin/python python/lexicon_tools.py quality --limit 25 \
+  --output python/lexicon_wlasl/quality_audit.json
+python/.venv/bin/python python/lexicon_tools.py unresolved "hi mom" "running classes"
+python/.venv/bin/python python/lexicon_tools.py aliases --terms-file user_vocab.txt
+python/.venv/bin/python python/lexicon_tools.py suggest "colour" "phone call"
+```
+
+`quality_audit.json` is intentionally compact: it stores summary counts plus
+the weakest entries and ranked slices for short clips, unstable hand tracking,
+pose jumpiness, incomplete coverage, and missing or unreadable pose data.
