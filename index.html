@@ -46,7 +46,7 @@
     }
     .mode-btn.active { color: #fff; background: #2471a3; border-color: #2471a3; }
 
-    .trust-strip, .service-notice, .pairing-panel {
+    .trust-strip, .service-notice, .pairing-panel, .demo-status-drawer {
       border: 1px solid #2a2a2a;
       background: rgba(255,255,255,0.06);
       border-radius: 6px;
@@ -67,6 +67,103 @@
       overflow-wrap: anywhere;
     }
     .service-notice.visible { display: block; }
+    .demo-status-drawer {
+      overflow: hidden;
+      font-size: 12px;
+    }
+    .demo-status-drawer summary {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 9px 10px;
+      cursor: pointer;
+      list-style: none;
+      font-weight: 800;
+    }
+    .demo-status-drawer summary::-webkit-details-marker { display: none; }
+    .summary-pill {
+      padding: 4px 7px;
+      border: 1px solid #444;
+      border-radius: 999px;
+      color: #ddd;
+      background: #161616;
+      font-size: 11px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .summary-pill.is-ok {
+      color: #dfffe8;
+      border-color: rgba(46,204,113,0.65);
+      background: rgba(46,204,113,0.12);
+    }
+    .summary-pill.is-warn {
+      color: #fff3ad;
+      border-color: rgba(255,225,77,0.55);
+      background: rgba(255,225,77,0.1);
+    }
+    .summary-pill.is-bad {
+      color: #ffe5e1;
+      border-color: rgba(231,76,60,0.65);
+      background: rgba(231,76,60,0.12);
+    }
+    .status-list {
+      display: grid;
+      gap: 1px;
+      border-top: 1px solid #242424;
+    }
+    .status-row {
+      display: grid;
+      grid-template-columns: 12px minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 10px;
+      background: rgba(0,0,0,0.16);
+      min-width: 0;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #777;
+    }
+    .status-row.is-ok .status-dot { background: #2ecc71; }
+    .status-row.is-warn .status-dot { background: #ffe14d; }
+    .status-row.is-bad .status-dot { background: #e74c3c; }
+    .status-row.is-pending .status-dot { background: #4aa3ff; }
+    .status-row.is-idle .status-dot { background: #999; }
+    .status-main {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+    .status-label {
+      color: #f4f4f4;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .status-detail {
+      color: #aaa;
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .status-value {
+      color: #ddd;
+      font-size: 11px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .status-note {
+      padding: 8px 10px 10px;
+      color: #aaa;
+      border-top: 1px solid #242424;
+      font-size: 11px;
+      line-height: 1.35;
+    }
     .pairing-panel {
       display: grid;
       gap: 10px;
@@ -205,7 +302,7 @@
 
     .demo-panel {
       display: grid;
-      gap: 5px;
+      gap: 7px;
       min-width: 0;
     }
     .demo-grid {
@@ -215,18 +312,50 @@
       min-width: 0;
     }
     .demo-btn {
-      padding: 8px 6px;
+      display: grid;
+      gap: 3px;
+      align-content: center;
+      padding: 8px 7px;
       font-size: 12px;
       line-height: 1.2;
       background: #202020;
       border: 1px solid #444;
       border-radius: 6px;
       color: #f5f5f5;
-      min-height: 38px;
+      min-height: 70px;
+      text-align: left;
+    }
+    .demo-btn:hover:not(:disabled) {
+      border-color: #6a6a6a;
+      background: #262626;
     }
     .demo-btn:focus-visible {
       outline: 3px solid #ffe14d;
       outline-offset: 2px;
+    }
+    .demo-category {
+      color: #ffe14d;
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .demo-label {
+      color: #fff;
+      font-size: 13px;
+      font-weight: 800;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .demo-text {
+      color: #bdbdbd;
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     #demoStatus {
       min-height: 1.3em;
@@ -343,6 +472,15 @@
     </div>
   </section>
 
+  <details id="demoStatusDrawer" class="demo-status-drawer" open>
+    <summary>
+      <span>Demo readiness</span>
+      <span id="demoReadinessSummary" class="summary-pill">Checking</span>
+    </summary>
+    <div id="demoChecklist" class="status-list" role="list"></div>
+    <div class="status-note">Live checks only. Demo phrases are curated samples, not a claim of certified interpretation accuracy.</div>
+  </details>
+
   <div id="mode-bar" role="tablist" aria-label="Translation mode">
     <button id="speakModeBtn" class="mode-btn active" type="button" role="tab" aria-selected="true" aria-controls="speak-panel">Speak to Sign</button>
     <button id="signModeBtn" class="mode-btn" type="button" role="tab" aria-selected="false" aria-controls="sign-panel">Sign to Speak</button>
@@ -403,12 +541,161 @@ const qrPlaceholder = document.getElementById('qrPlaceholder');
 const glassesLinkInput = document.getElementById('glassesLinkInput');
 const pairingMeta = document.getElementById('pairingMeta');
 const copyGlassesBtn = document.getElementById('copyGlassesBtn');
+const demoReadinessSummary = document.getElementById('demoReadinessSummary');
+const demoChecklistEl = document.getElementById('demoChecklist');
 let glassesUrl = `${location.origin}/glasses?room=${encodeURIComponent(roomId)}`;
 let pairingHasConnected = false;
 let pairingExpiresAt = null;
 
 roomLabel.textContent = roomId.slice(0, 8);
 glassesLinkInput.value = glassesUrl;
+
+function initialMicStatus() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return {
+      state: 'bad',
+      value: 'Unavailable',
+      detail: 'This browser cannot capture microphone audio.',
+    };
+  }
+  return {
+    state: 'warn',
+    value: 'Needs permission',
+    detail: 'Permission is requested when Start is pressed.',
+  };
+}
+
+const demoState = {
+  pose: {
+    label: 'Pose server',
+    state: 'pending',
+    value: 'Checking',
+    detail: 'Python signing service',
+  },
+  mic: {
+    label: 'Microphone',
+    ...initialMicStatus(),
+  },
+  speech: {
+    label: 'Speech recognition',
+    state: 'pending',
+    value: 'Checking',
+    detail: 'Live speech-to-text configuration',
+  },
+  glasses: {
+    label: 'Glasses pairing',
+    state: 'warn',
+    value: 'Unpaired',
+    detail: 'Scan the QR code to connect the glasses display.',
+  },
+  session: {
+    label: 'Room/session',
+    state: 'pending',
+    value: 'Connecting',
+    detail: `Room ${roomId.slice(0, 8)}`,
+  },
+  avatar: {
+    label: 'Avatar playback',
+    state: 'idle',
+    value: 'Idle',
+    detail: 'Waiting for speech or a demo phrase.',
+  },
+};
+let micPermissionGranted = false;
+
+function readinessSummary() {
+  const poseReady = demoState.pose.state === 'ok';
+  const speechReady = demoState.speech.state === 'ok';
+  const sessionReady = demoState.session.state === 'ok';
+  const micBlocked = demoState.mic.state === 'bad';
+
+  if (poseReady && speechReady && sessionReady && !micBlocked) {
+    return { state: 'ok', text: 'Live demo ready' };
+  }
+  if (poseReady && sessionReady) {
+    return { state: 'warn', text: 'Demo phrases ready' };
+  }
+  return { state: 'bad', text: 'Setup needed' };
+}
+
+function renderDemoChecklist() {
+  const summary = readinessSummary();
+  demoReadinessSummary.textContent = summary.text;
+  demoReadinessSummary.className = `summary-pill is-${summary.state}`;
+
+  demoChecklistEl.textContent = '';
+  Object.values(demoState).forEach((item) => {
+    const row = document.createElement('div');
+    row.className = `status-row is-${item.state}`;
+    row.setAttribute('role', 'listitem');
+
+    const dotEl = document.createElement('span');
+    dotEl.className = 'status-dot';
+    dotEl.setAttribute('aria-hidden', 'true');
+
+    const mainEl = document.createElement('span');
+    mainEl.className = 'status-main';
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'status-label';
+    labelEl.textContent = item.label;
+
+    const detailEl = document.createElement('span');
+    detailEl.className = 'status-detail';
+    detailEl.textContent = item.detail;
+
+    const valueEl = document.createElement('span');
+    valueEl.className = 'status-value';
+    valueEl.textContent = item.value;
+
+    mainEl.append(labelEl, detailEl);
+    row.append(dotEl, mainEl, valueEl);
+    demoChecklistEl.appendChild(row);
+  });
+}
+
+function setDemoState(key, patch) {
+  Object.assign(demoState[key], patch);
+  renderDemoChecklist();
+}
+
+async function refreshMicPermissionStatus() {
+  if (!navigator.permissions || !navigator.permissions.query || demoState.mic.state === 'bad') return;
+  try {
+    const permission = await navigator.permissions.query({ name: 'microphone' });
+    const applyPermission = () => {
+      if (permission.state === 'granted') {
+        micPermissionGranted = true;
+        setDemoState('mic', {
+          state: 'ok',
+          value: 'Available',
+          detail: recording ? 'Microphone stream is active.' : 'Permission granted; currently stopped.',
+        });
+      } else if (permission.state === 'denied') {
+        micPermissionGranted = false;
+        setDemoState('mic', {
+          state: 'bad',
+          value: 'Blocked',
+          detail: 'Browser permission is denied.',
+        });
+      } else {
+        micPermissionGranted = false;
+        setDemoState('mic', {
+          state: 'warn',
+          value: 'Needs permission',
+          detail: 'Permission is requested when Start is pressed.',
+        });
+      }
+    };
+    applyPermission();
+    permission.onchange = applyPermission;
+  } catch (e) {
+    // Some browsers do not expose microphone permission state.
+  }
+}
+
+renderDemoChecklist();
+refreshMicPermissionStatus();
 
 copyGlassesBtn.addEventListener('click', async () => {
   const original = copyGlassesBtn.textContent;
@@ -457,6 +744,11 @@ function renderPairingPresence(glassesConnected) {
       'Glasses connected',
       'You are paired. Start speaking here or on the glasses.'
     );
+    setDemoState('glasses', {
+      state: 'ok',
+      value: 'Paired',
+      detail: 'Glasses display is connected to this room.',
+    });
     return;
   }
 
@@ -466,12 +758,22 @@ function renderPairingPresence(glassesConnected) {
       'Connection lost',
       'The glasses disconnected. Reopen the glasses page or scan the QR code again.'
     );
+    setDemoState('glasses', {
+      state: 'bad',
+      value: 'Disconnected',
+      detail: 'Reconnect the glasses page or scan the QR code again.',
+    });
   } else {
     setPairingState(
       'waiting',
       'Waiting for glasses',
       'Scan this code from the glasses to join this room.'
     );
+    setDemoState('glasses', {
+      state: 'warn',
+      value: 'Unpaired',
+      detail: 'Scan the QR code to connect the glasses display.',
+    });
   }
 }
 
@@ -543,9 +845,15 @@ let displayWS   = null;
 let demoBusy    = false;
 let poseServiceReachable = true;
 const WATCHDOG_MS = 30000;
+const HEALTH_POLL_MS = 15000;
 
 function enqueuePose(blob) {
   poseQueue.push(URL.createObjectURL(blob));
+  setDemoState('avatar', {
+    state: playing ? 'ok' : 'pending',
+    value: playing ? `Queued (${poseQueue.length})` : 'Loading',
+    detail: 'A sign clip arrived for avatar playback.',
+  });
   if (!playing) playNext();
 }
 
@@ -556,13 +864,27 @@ function clearPoseQueue() {
 function playNext() {
   if (watchdog) { clearTimeout(watchdog); watchdog = null; }
   if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
-  if (!poseQueue.length) { playing = false; stopSigning(); return; }
+  if (!poseQueue.length) {
+    playing = false;
+    stopSigning();
+    setDemoState('avatar', {
+      state: 'idle',
+      value: 'Idle',
+      detail: 'Playback complete.',
+    });
+    return;
+  }
   playing = true;
   currentUrl = poseQueue.shift();
   const url = currentUrl;
   const apply = () => {
     signer.src = url;
     try { if (typeof signer.play === 'function') signer.play(); } catch (e) {}
+    setDemoState('avatar', {
+      state: 'ok',
+      value: poseQueue.length ? `Playing + ${poseQueue.length}` : 'Playing',
+      detail: 'Sign clip is live on the avatar.',
+    });
     watchdog = setTimeout(playNext, WATCHDOG_MS);
   };
   if (window.customElements && customElements.whenDefined) {
@@ -584,6 +906,11 @@ function resetSigning(notifyServer = true) {
   stopSigning();
   transcriptEl.textContent = '';
   demoStatusEl.textContent = '';
+  setDemoState('avatar', {
+    state: 'idle',
+    value: 'Idle',
+    detail: 'Playback reset.',
+  });
   if (notifyServer && displayWS && displayWS.readyState === WebSocket.OPEN) {
     displayWS.send(JSON.stringify({ type: 'reset' }));
   }
@@ -606,6 +933,13 @@ function handleDisplayMessage(event) {
       const text = msg.text || msg.error || 'Service unavailable.';
       setStatus('error', text);
       transcriptEl.textContent = text;
+      if (msg.scope === 'pose') {
+        setDemoState('avatar', {
+          state: 'bad',
+          value: 'Unavailable',
+          detail: text,
+        });
+      }
     }
   }
 }
@@ -624,10 +958,20 @@ function connectDisplay() {
   displayWS.binaryType = 'arraybuffer';
   displayWS.onopen = () => {
     setStatus('live', `Live · ${roomId.slice(0, 6)}`);
+    setDemoState('session', {
+      state: 'ok',
+      value: 'Live',
+      detail: `Room ${roomId.slice(0, 8)} connected.`,
+    });
     renderPairingPresence(false);
   };
   displayWS.onclose = () => {
     setStatus('error', 'Reconnecting');
+    setDemoState('session', {
+      state: 'warn',
+      value: 'Reconnecting',
+      detail: `Room ${roomId.slice(0, 8)} display socket is reconnecting.`,
+    });
     setPairingState(
       'lost',
       'Connection lost',
@@ -656,7 +1000,21 @@ function renderDemoPhrases(phrases) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'demo-btn';
-    button.textContent = phrase.label;
+    button.setAttribute('aria-label', `${phrase.category || 'Demo'}: ${phrase.text || phrase.label}`);
+
+    const category = document.createElement('span');
+    category.className = 'demo-category';
+    category.textContent = phrase.category || 'Demo';
+
+    const label = document.createElement('span');
+    label.className = 'demo-label';
+    label.textContent = phrase.label;
+
+    const text = document.createElement('span');
+    text.className = 'demo-text';
+    text.textContent = phrase.text || '';
+
+    button.append(category, label, text);
     button.addEventListener('click', () => playDemoPhrase(phrase));
     demoPhrasesEl.appendChild(button);
   });
@@ -669,6 +1027,7 @@ async function loadDemoPhrases() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const { enabled, phrases } = await response.json();
     renderDemoPhrases(enabled ? (phrases || []) : []);
+    if (!enabled) demoStatusEl.textContent = 'Demo phrases disabled.';
   } catch (e) {
     demoStatusEl.textContent = 'Demo phrases unavailable.';
   }
@@ -678,12 +1037,22 @@ async function playDemoPhrase(phrase) {
   if (demoBusy) return;
   if (!poseServiceReachable) {
     demoStatusEl.textContent = 'Pose server offline.';
+    setDemoState('avatar', {
+      state: 'bad',
+      value: 'Offline',
+      detail: 'Start the Python pose server before playing demo phrases.',
+    });
     return;
   }
 
   demoBusy = true;
   refreshDemoButtons();
   demoStatusEl.textContent = `Signing ${phrase.label}...`;
+  setDemoState('avatar', {
+    state: 'pending',
+    value: 'Generating',
+    detail: `Preparing "${phrase.label}" demo phrase.`,
+  });
 
   try {
     const response = await fetch('/api/demo/pose', {
@@ -695,10 +1064,20 @@ async function playDemoPhrase(phrase) {
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     transcriptEl.textContent = payload.text || phrase.text;
     demoStatusEl.textContent = payload.gloss ? `Gloss ${payload.gloss}` : 'Sent to display.';
+    setDemoState('avatar', {
+      state: 'pending',
+      value: 'Streaming',
+      detail: 'Pose generated; waiting for avatar playback.',
+    });
   } catch (e) {
     console.error('[Demo]', e);
     setStatus('error', 'Demo unavailable');
     demoStatusEl.textContent = e.message || 'Demo unavailable.';
+    setDemoState('avatar', {
+      state: 'bad',
+      value: 'Unavailable',
+      detail: e.message || 'Demo signing failed.',
+    });
   } finally {
     demoBusy = false;
     refreshDemoButtons();
@@ -720,6 +1099,22 @@ async function loadServiceHealth() {
     const services = health.services || {};
     const issues = [];
     poseServiceReachable = Boolean(services.pose?.reachable);
+    setDemoState('pose', {
+      state: poseServiceReachable ? 'ok' : 'bad',
+      value: poseServiceReachable ? 'Online' : 'Offline',
+      detail: poseServiceReachable
+        ? 'Python signing service is reachable.'
+        : `Python signing service is ${services.pose?.status || 'unreachable'}.`,
+    });
+
+    const speechConfigured = Boolean(services.deepgram?.configured);
+    setDemoState('speech', {
+      state: speechConfigured ? 'ok' : 'bad',
+      value: speechConfigured ? 'Configured' : 'Missing key',
+      detail: speechConfigured
+        ? 'Live speech recognition is configured.'
+        : 'DEEPGRAM_API_KEY is not set on the server.',
+    });
 
     if (!services.deepgram?.configured) {
       issues.push('Speech input unavailable until DEEPGRAM_API_KEY is configured.');
@@ -727,6 +1122,13 @@ async function loadServiceHealth() {
       micBtn.disabled = true;
       micBtn.textContent = 'Speech unavailable';
       micBtn.title = 'Set DEEPGRAM_API_KEY on the server to enable Speak to Sign.';
+    } else {
+      delete micBtn.dataset.serviceDisabled;
+      micBtn.title = '';
+      if (!recording) {
+        micBtn.disabled = false;
+        micBtn.textContent = 'Start';
+      }
     }
     if (!poseServiceReachable) {
       issues.push('Signing avatar service is offline; start the Python pose server.');
@@ -741,26 +1143,60 @@ async function loadServiceHealth() {
     setServiceNotice(issues);
     refreshDemoButtons();
   } catch (e) {
+    poseServiceReachable = false;
+    setDemoState('pose', {
+      state: 'bad',
+      value: 'Unknown',
+      detail: 'Service health endpoint could not be reached.',
+    });
+    setDemoState('speech', {
+      state: 'warn',
+      value: 'Unknown',
+      detail: 'Service health endpoint could not be reached.',
+    });
     setServiceNotice(['Service health could not be checked.']);
+    refreshDemoButtons();
   }
 }
 
 loadServiceHealth();
+setInterval(loadServiceHealth, HEALTH_POLL_MS);
 loadDemoPhrases();
 
 async function startMic() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     setStatus('error', 'Mic unavailable');
     transcriptEl.textContent = 'Microphone access is unavailable in this browser.';
+    setDemoState('mic', {
+      state: 'bad',
+      value: 'Unavailable',
+      detail: 'This browser cannot capture microphone audio.',
+    });
     return;
   }
+  setDemoState('mic', {
+    state: 'pending',
+    value: 'Requesting',
+    detail: 'Waiting for browser microphone permission.',
+  });
   try {
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (e) {
     console.error('Mic permission denied:', e);
     setStatus('error', 'Mic denied');
+    setDemoState('mic', {
+      state: 'bad',
+      value: 'Blocked',
+      detail: 'Microphone permission was denied.',
+    });
     return;
   }
+  micPermissionGranted = true;
+  setDemoState('mic', {
+    state: 'ok',
+    value: 'Available',
+    detail: 'Microphone stream is active.',
+  });
   micWs = new WebSocket(wsUrl('audio'));
   micWs.binaryType = 'arraybuffer';
   const activeMicWs = micWs;
@@ -810,6 +1246,21 @@ function stopMic() {
   recording = false;
   micBtn.textContent = micBtn.dataset.serviceDisabled === 'true' ? 'Speech unavailable' : 'Start';
   micBtn.classList.remove('recording');
+  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia && demoState.mic.state !== 'bad') {
+    if (micPermissionGranted) {
+      setDemoState('mic', {
+        state: 'ok',
+        value: 'Available',
+        detail: 'Permission granted; currently stopped.',
+      });
+    } else {
+      setDemoState('mic', {
+        state: 'warn',
+        value: 'Needs permission',
+        detail: 'Permission is requested when Start is pressed.',
+      });
+    }
+  }
   if (displayWS && displayWS.readyState === WebSocket.OPEN) {
     setStatus('live', `Live · ${roomId.slice(0, 6)}`);
   }

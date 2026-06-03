@@ -30,10 +30,60 @@ const DEMO_POSE_ENABLED = process.env.DEMO_POSE_ENABLED !== '0';
 const ALLOW_CUSTOM_DEMO_POSE = process.env.ALLOW_CUSTOM_DEMO_POSE === '1';
 
 const DEMO_PHRASES = Object.freeze([
-  { id: 'hello', label: 'Hello', text: 'hello nice meet you' },
-  { id: 'help', label: 'Need help', text: 'please help me' },
-  { id: 'family', label: 'Family', text: 'my family learn sign' },
-  { id: 'yes-no', label: 'Yes / no', text: 'yes no' },
+  {
+    id: 'hello',
+    category: 'Greeting',
+    label: 'Good morning',
+    text: 'good morning nice meet you',
+  },
+  {
+    id: 'help',
+    category: 'Help',
+    label: 'Ask for help',
+    text: 'please help me',
+  },
+  {
+    id: 'emergency',
+    category: 'Emergency',
+    label: 'Call a doctor',
+    text: 'emergency please call doctor',
+  },
+  {
+    id: 'directions',
+    category: 'Directions',
+    label: 'Find cafeteria',
+    text: 'where cafeteria',
+  },
+  {
+    id: 'introduction',
+    category: 'Introduction',
+    label: 'My name is Alex',
+    text: 'my name alex nice meet you',
+  },
+  {
+    id: 'yes-no',
+    category: 'Yes / no',
+    label: 'Quick answer',
+    text: 'yes no understand',
+  },
+  {
+    id: 'repeat',
+    category: 'Repeat',
+    label: 'Say that again',
+    text: 'please repeat again',
+  },
+  {
+    id: 'thanks',
+    category: 'Thank you',
+    label: 'Thanks for helping',
+    text: 'thank you for help',
+  },
+  {
+    id: 'school-office',
+    category: 'School desk',
+    label: 'Office check-in',
+    text: 'please help student find school office',
+  },
 ]);
 
 const deepgram = DEEPGRAM_API_KEY ? createClient(DEEPGRAM_API_KEY) : null;
