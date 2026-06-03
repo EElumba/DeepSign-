@@ -884,8 +884,27 @@ function setDemoState(key, patch) {
 
 const METRIC_STAGE_LABELS = {
   speech_transcription: 'Speech transcription',
+  text_normalization: 'Text normalization',
   gloss: 'Text-to-sign gloss',
   pose_generation: 'Pose generation',
+  alias_resolution: 'Alias resolution',
+  simple_gloss: 'Simple glosser',
+  pose_library_import: 'Pose library import',
+  pose_lookup_init: 'Pose lookup init',
+  wlasl_lookup: 'WLASL lookup',
+  motion_generation: 'Motion generation',
+  pose_processing: 'Pose processing',
+  body_stabilization: 'Body stabilization',
+  face_stabilization: 'Face stabilization',
+  face_simplification: 'Face simplification',
+  avatar_shift: 'Avatar positioning',
+  pose_serialization: 'Pose serialization',
+  pose_parse: 'Pose parsing',
+  pose_file_read: 'Pose file read',
+  subprocess_generation: 'Pose subprocess',
+  network_transfer: 'Network transfer',
+  response_body_read: 'Pose transfer read',
+  json_serialization: 'JSON serialization',
   avatar_playback_start: 'Avatar start',
   recognition: 'Recognition',
   gloss_to_english: 'Gloss-to-English',
@@ -1122,6 +1141,7 @@ let poseServiceReachable = true;
 let pendingPoseMetric = null;
 const WATCHDOG_MS = 30000;
 const HEALTH_POLL_MS = 15000;
+const AUDIO_PROCESSOR_BUFFER_SIZE = 1024;
 
 function enqueuePose(blob) {
   const entry = {
@@ -1533,7 +1553,7 @@ async function startMic() {
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   audioCtx     = new AudioCtx({ sampleRate: 16000 });
   micSource    = audioCtx.createMediaStreamSource(micStream);
-  micProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+  micProcessor = audioCtx.createScriptProcessor(AUDIO_PROCESSOR_BUFFER_SIZE, 1, 1);
   micProcessor.onaudioprocess = (e) => {
     if (!micWs || micWs.readyState !== 1) return;
     const float32 = e.inputBuffer.getChannelData(0);

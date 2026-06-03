@@ -30,13 +30,67 @@ const DEMO_POSE_ENABLED = process.env.DEMO_POSE_ENABLED !== '0';
 const ALLOW_CUSTOM_DEMO_POSE = process.env.ALLOW_CUSTOM_DEMO_POSE === '1';
 const METRIC_STAGES = Object.freeze([
   'speech_transcription',
+  'text_normalization',
   'gloss',
   'pose_generation',
+  'alias_resolution',
+  'simple_gloss',
+  'pose_library_import',
+  'pose_lookup_init',
+  'wlasl_lookup',
+  'motion_generation',
+  'pose_processing',
+  'body_stabilization',
+  'face_stabilization',
+  'face_simplification',
+  'avatar_shift',
+  'pose_serialization',
+  'pose_parse',
+  'pose_file_read',
+  'subprocess_generation',
+  'network_transfer',
+  'response_body_read',
+  'json_serialization',
   'avatar_playback_start',
   'recognition',
   'gloss_to_english',
   'tts',
 ]);
+const LATENCY_BREAKDOWN_STAGES = Object.freeze([
+  'speech_transcription',
+  'text_normalization',
+  'gloss',
+  'alias_resolution',
+  'simple_gloss',
+  'pose_library_import',
+  'pose_lookup_init',
+  'wlasl_lookup',
+  'motion_generation',
+  'pose_processing',
+  'pose_serialization',
+  'network_transfer',
+  'avatar_playback_start',
+  'recognition',
+  'gloss_to_english',
+  'tts',
+]);
+const PYTHON_POSE_TIMING_STAGES = Object.freeze({
+  alias_resolution: 'alias_resolution',
+  simple_gloss: 'simple_gloss',
+  pose_library_import: 'pose_library_import',
+  pose_lookup_init: 'pose_lookup_init',
+  pose_loading: 'wlasl_lookup',
+  motion_generation: 'motion_generation',
+  pose_processing: 'pose_processing',
+  body_stabilization: 'body_stabilization',
+  face_stabilization: 'face_stabilization',
+  face_simplification: 'face_simplification',
+  avatar_shift: 'avatar_shift',
+  pose_serialization: 'pose_serialization',
+  pose_parse: 'pose_parse',
+  pose_file_read: 'pose_file_read',
+  subprocess_generation: 'subprocess_generation',
+});
 const MAX_METRIC_DURATION_MS = 10 * 60 * 1000;
 
 const DEMO_PHRASES = Object.freeze([
@@ -249,6 +303,33 @@ function latestTiming(store) {
     ?.[1] || null;
 }
 
+function latencyBreakdown(store) {
+  const rows = LATENCY_BREAKDOWN_STAGES
+    .map((stage) => {
+      const timing = store.timings[stage];
+      if (!timing || !timing.count || timing.avgMs === null) return null;
+      return {
+        stage,
+        count: timing.count,
+        avgMs: timing.avgMs,
+        worstMs: timing.maxMs,
+        lastMs: timing.lastMs,
+        updatedAt: timing.updatedAt,
+      };
+    })
+    .filter(Boolean);
+  const totalAvgMs = rows.reduce((sum, row) => sum + Number(row.avgMs || 0), 0);
+  return {
+    estimatedTotalAvgMs: roundMetricMs(totalAvgMs),
+    stages: rows.map((row) => ({
+      ...row,
+      estimatedPctOfMeasuredAvg: totalAvgMs > 0
+        ? roundMetricMs((Number(row.avgMs || 0) / totalAvgMs) * 100)
+        : null,
+    })),
+  };
+}
+
 function metricsSnapshot(store) {
   return {
     scope: store.scope,
@@ -259,6 +340,7 @@ function metricsSnapshot(store) {
       Object.entries(store.timings).map(([stage, timing]) => [stage, { ...timing }])
     ),
     latestTiming: latestTiming(store),
+    latencyBreakdown: latencyBreakdown(store),
     failures: {
       total: store.failures.total,
       byCategory: { ...store.failures.byCategory },
@@ -818,13 +900,26 @@ app.post('/api/demo/pose', async (req, res) => {
 
   const room = getRoom(roomId);
   const generation = room.poseGeneration;
-  const signableText = expandDigitsForSigning(phrase.text);
   const pipelineId = createPipelineId();
 
   try {
+    let normalizationMs = 0;
+    let normalizeStartedAt = performance.now();
+    const signableText = expandDigitsForSigning(phrase.text);
+    normalizationMs += performance.now() - normalizeStartedAt;
+
     const glossStartedAt = performance.now();
     const glossResult = await englishToAslGlossResult(signableText);
+    normalizeStartedAt = performance.now();
     const gloss = expandDigitsForSigning(glossResult.gloss);
+    normalizationMs += performance.now() - normalizeStartedAt;
+    recordTiming(room, 'text_normalization', normalizationMs, {
+      route: '/api/demo/pose',
+      source: 'demo',
+      status: 'ok',
+      pipelineId,
+      broadcast: false,
+    });
     recordTiming(room, 'gloss', performance.now() - glossStartedAt, {
       route: '/api/demo/pose',
       source: 'demo',
@@ -849,6 +944,12 @@ app.post('/api/demo/pose', async (req, res) => {
     }));
 
     const poseResult = await generatePose(gloss);
+    recordPoseDetailTimings(room, poseResult, {
+      route: '/api/demo/pose',
+      source: 'demo',
+      status: poseResult.status,
+      pipelineId,
+    });
     recordTiming(room, 'pose_generation', poseResult.durationMs, {
       route: '/api/demo/pose',
       source: 'demo',
@@ -968,10 +1069,18 @@ app.post('/api/recognize', async (req, res) => {
   }
 
   try {
+    const jsonStartedAt = performance.now();
+    const requestBody = JSON.stringify({ frames });
+    recordTiming(room, 'json_serialization', performance.now() - jsonStartedAt, {
+      route: '/api/recognize',
+      source: 'browser',
+      status: 'ok',
+      broadcast: false,
+    });
     const r = await fetch(`${POSE_SERVER_URL}/recognize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ frames }),
+      body: requestBody,
     });
     recordTiming(room, 'recognition', performance.now() - startedAt, {
       route: '/api/recognize',
@@ -1239,21 +1348,39 @@ async function generatePose(text) {
       body: JSON.stringify({ text }),
       signal: controller.signal,
     });
-    const durationMs = performance.now() - startedAt;
+    const headersMs = performance.now() - startedAt;
+    const timings = parsePoseTimingsHeader(res);
     if (!res.ok) {
       console.error(`[Pose] Python server error: ${res.status}`);
       return {
         ok: false,
         arrayBuffer: null,
-        durationMs,
+        durationMs: headersMs,
+        headersMs,
+        responseBodyReadMs: 0,
+        networkTransferMs: null,
+        timings,
         status: `http_${res.status}`,
         errorCategory: 'pose_http_error',
       };
     }
+    const bodyStartedAt = performance.now();
+    const arrayBuffer = await res.arrayBuffer();
+    const responseBodyReadMs = performance.now() - bodyStartedAt;
+    const durationMs = performance.now() - startedAt;
+    const serverTotalMs = Number(timings?.pose_total);
+    const networkTransferMs = Number.isFinite(serverTotalMs)
+      ? Math.max(0, durationMs - serverTotalMs)
+      : responseBodyReadMs;
     return {
       ok: true,
-      arrayBuffer: await res.arrayBuffer(),
+      arrayBuffer,
       durationMs,
+      headersMs,
+      responseBodyReadMs,
+      networkTransferMs,
+      timings,
+      bytes: arrayBuffer.byteLength,
       status: 'ok',
       errorCategory: null,
     };
@@ -1266,6 +1393,10 @@ async function generatePose(text) {
       ok: false,
       arrayBuffer: null,
       durationMs: performance.now() - startedAt,
+      headersMs: null,
+      responseBodyReadMs: 0,
+      networkTransferMs: null,
+      timings: null,
       status: err.name === 'AbortError' ? 'timeout' : 'unreachable',
       errorCategory: err.name === 'AbortError' ? 'pose_timeout' : 'pose_unreachable',
     };
@@ -1346,6 +1477,58 @@ function resetRoomPlayback(room) {
   console.log(`[Room ${room.id}] Reset playback and cleared pending generation ${room.poseGeneration}.`);
 }
 
+function parsePoseTimingsHeader(response) {
+  const raw = response.headers.get('x-deepsign-pose-timings');
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    const timings = {};
+    for (const [key, value] of Object.entries(parsed || {})) {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        timings[key] = roundMetricMs(value);
+      } else if (typeof value === 'string') {
+        timings[key] = value.slice(0, 80);
+      }
+    }
+    return timings;
+  } catch {
+    return null;
+  }
+}
+
+function recordPoseDetailTimings(room, poseResult, meta = {}) {
+  const timings = poseResult?.timings || {};
+  for (const [pythonStage, metricStage] of Object.entries(PYTHON_POSE_TIMING_STAGES)) {
+    const durationMs = Number(timings[pythonStage]);
+    if (!Number.isFinite(durationMs)) continue;
+    recordTiming(room, metricStage, durationMs, {
+      route: meta.route,
+      source: meta.source || 'pose_server',
+      status: timings.cache === 'hit' ? 'cache' : (meta.status || poseResult.status),
+      pipelineId: meta.pipelineId,
+      broadcast: false,
+    });
+  }
+  if (Number.isFinite(Number(poseResult?.networkTransferMs))) {
+    recordTiming(room, 'network_transfer', poseResult.networkTransferMs, {
+      route: meta.route,
+      source: meta.source || 'pose_server',
+      status: meta.status || poseResult.status,
+      pipelineId: meta.pipelineId,
+      broadcast: false,
+    });
+  }
+  if (Number.isFinite(Number(poseResult?.responseBodyReadMs))) {
+    recordTiming(room, 'response_body_read', poseResult.responseBodyReadMs, {
+      route: meta.route,
+      source: meta.source || 'pose_server',
+      status: meta.status || poseResult.status,
+      pipelineId: meta.pipelineId,
+      broadcast: false,
+    });
+  }
+}
+
 wss.on('connection', (ws, request) => {
   const { role, roomId, clientType } = parseWebSocketRequest(request);
   if (!roomId) {
@@ -1420,10 +1603,23 @@ wss.on('connection', (ws, request) => {
     const pipelineId = createPipelineId();
     poseChain = poseChain
       .then(async () => {
+        let normalizationMs = 0;
+        let normalizeStartedAt = performance.now();
         const signableText = expandDigitsForSigning(text);
+        normalizationMs += performance.now() - normalizeStartedAt;
+
         const glossStartedAt = performance.now();
         const glossResult = await englishToAslGlossResult(signableText);
+        normalizeStartedAt = performance.now();
         const gloss = expandDigitsForSigning(glossResult.gloss);
+        normalizationMs += performance.now() - normalizeStartedAt;
+        recordTiming(room, 'text_normalization', normalizationMs, {
+          route: '/ws/audio',
+          source: 'speech',
+          status: 'ok',
+          pipelineId,
+          broadcast: false,
+        });
         recordTiming(room, 'gloss', performance.now() - glossStartedAt, {
           route: '/ws/audio',
           source: 'speech',
@@ -1440,6 +1636,12 @@ wss.on('connection', (ws, request) => {
         }
 
         const poseResult = await generatePose(gloss);
+        recordPoseDetailTimings(room, poseResult, {
+          route: '/ws/audio',
+          source: 'speech',
+          status: poseResult.status,
+          pipelineId,
+        });
         recordTiming(room, 'pose_generation', poseResult.durationMs, {
           route: '/ws/audio',
           source: 'speech',

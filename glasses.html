@@ -200,6 +200,7 @@
     let audioContext = null;
     let source = null;
     let processor = null;
+    const AUDIO_PROCESSOR_BUFFER_SIZE = 1024;
 
     // --- Display WebSocket (binary .pose + JSON transcript metadata) ---
     // The glasses load this page over HTTPS, so we must use wss:// (the runtime
@@ -290,7 +291,7 @@
       audioContext = new AudioCtx({ sampleRate: 16000 });
       source = audioContext.createMediaStreamSource(stream);
       // ScriptProcessor is deprecated but reliably available in embedded WebViews.
-      processor = audioContext.createScriptProcessor(4096, 1, 1);
+      processor = audioContext.createScriptProcessor(AUDIO_PROCESSOR_BUFFER_SIZE, 1, 1);
 
       processor.onaudioprocess = (e) => {
         if (!micWs || micWs.readyState !== 1) return;
