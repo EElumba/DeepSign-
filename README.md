@@ -1,16 +1,19 @@
 # ASL Pose Avatar MVP
 
 Real-time speech → ASL stick-figure signer. You speak into a Ray-Ban Meta glasses
-mic, Deepgram transcribes it, a Python server converts the text into a `.pose`
-skeleton file via [`spoken-to-signed-translation`](https://github.com/ZurichNLP/spoken-to-signed-translation),
+mic, Deepgram transcribes it, Node commits short transcript chunks as soon as
+they are finalized, the Python server converts each chunk into a `.pose`
+skeleton clip via [`spoken-to-signed-translation`](https://github.com/ZurichNLP/spoken-to-signed-translation),
 and the [`pose-viewer`](https://www.npmjs.com/package/pose-viewer) web component
-animates the signer in the glasses browser.
+progressively animates the signer in the glasses browser.
 
 ```
-Mic → Node /ws/audio/<room> WS → Deepgram Nova-3 → Node POST :8000/pose
-    → Python FastAPI (text_to_gloss_to_pose) → .pose binary
-    → Node sends ArrayBuffer to /ws/display/<room> clients only
-    → pose-viewer renders the signer
+Mic → Node /ws/audio/<room> WS → Deepgram Nova-3
+    → finalized transcript chunk → incremental ASL gloss
+    → Node POST :8000/pose per chunk
+    → Python FastAPI cached lexicon lookup → .pose binary clip
+    → Node sends pose metadata + ArrayBuffer to /ws/display/<room> clients only
+    → browser playback buffer → pose-viewer renders progressive signing
 ```
 
 ## Prerequisites
@@ -58,6 +61,17 @@ Visit `/api/health` to see which services are configured and whether the Python
 pose server is reachable. Speak→Sign requires `DEEPGRAM_API_KEY`; OpenAI glossing
 and ElevenLabs speech output fall back gracefully when unset.
 
+### Streaming latency controls
+
+Live signing is chunked by default so the avatar can start before a full phrase
+is complete. Tune the stream with these optional environment variables:
+
+- `STREAM_CHUNK_TARGET_WORDS` default `3`: finalized words per normal sign chunk.
+- `STREAM_CHUNK_MAX_WORDS` default `5`: largest forced chunk at speech end.
+- `STREAM_CHUNK_IDLE_MS` default `80`: wait before signing a short leftover chunk.
+- `STREAM_OPENAI_GLOSS=1`: opt into OpenAI glossing for streaming chunks. The
+  default is local incremental glossing to minimize perceived latency.
+
 For demos, the companion `/speak` page includes curated no-mic phrase buttons.
 Clicking one posts to `/api/demo/pose`, generates a pose through the Python
 server, and broadcasts it to every display client in the same private room
@@ -79,6 +93,108 @@ Wait for: `Application startup complete.` (the first request is pre-warmed on st
 
 ```bash
 npm start
+```
+
+## Real-service smoke test
+
+Run the end-to-end smoke test when you want a quick confidence check that the
+real Python pose server, `/speak`, `/glasses`, room WebSockets, demo signing, and
+health reporting still work together:
+
+```bash
+npm run smoke:e2e
+```
+
+The script starts a real FastAPI pose server on `127.0.0.1:8130` and a real
+Express frontend on `127.0.0.1:3130`, then:
+
+- waits for `GET /health` on the Python server
+- waits for `GET /api/health` on the frontend and confirms the pose service is reachable
+- creates a private room through `GET /api/sessions/new`
+- loads the matching `/speak?room=<id>` and `/glasses?room=<id>` pages
+- joins `/ws/display/<room-id>?client=glasses`
+- posts the curated demo phrase to `/api/demo/pose`, the same no-mic path used by `/speak`
+- passes only if the glasses display WebSocket receives the final transcript
+  JSON, streaming pose chunk metadata, and a non-empty binary `.pose` blob
+
+No raw audio or video is captured or stored. The smoke test uses the demo phrase
+path specifically so it can exercise the signing pipeline without microphone or
+camera permissions.
+
+## Recognition Correction UI
+
+The Sign to Speak panel shows recognized glosses as editable chips. Each chip
+can display confidence, be removed with undo, or be opened to choose a better
+candidate. Corrections are session-local in the browser by default: the app does
+not persist correction data and does not store raw video. If correction logging
+is added later, keep it opt-in only.
+
+Expected `/recognize` response shape for top-5 candidates:
+
+```json
+{
+  "gloss": "please",
+  "confidence": 0.82,
+  "mean_confidence": 0.76,
+  "temporal_confidence": 0.85,
+  "candidates": [
+    { "gloss": "please", "confidence": 0.82 },
+    { "gloss": "sorry", "confidence": 0.61 },
+    { "gloss": "thank you", "confidence": 0.58 }
+  ]
+}
+```
+
+The frontend also accepts `alternatives`, `top_candidates`, or `top5` arrays and
+candidate labels named `gloss`, `word`, `label`, `text`, or `value`.
+
+To test with sample recognition results, open `/speak?room=<room-id>`, switch to
+Sign to Speak, and run this in the browser console:
+
+```js
+DeepSignRecognitionDebug.addSample({
+  gloss: "please",
+  confidence: 0.82,
+  candidates: [
+    { gloss: "please", confidence: 0.82 },
+    { gloss: "sorry", confidence: 0.61 },
+    { gloss: "thank you", confidence: 0.58 },
+    { gloss: "help", confidence: 0.44 },
+    { gloss: "welcome", confidence: 0.39 }
+  ]
+});
+```
+
+Click the chip to pick an alternative, click "Use this instead" to confirm it,
+or remove the chip and use Undo.
+
+If you already have both services running, reuse them instead of letting the
+script start new processes:
+
+```bash
+SMOKE_REUSE_SERVICES=1 \
+SMOKE_APP_URL=http://127.0.0.1:3000 \
+SMOKE_POSE_URL=http://127.0.0.1:8000 \
+npm run smoke:e2e
+```
+
+Useful overrides:
+
+```bash
+SMOKE_APP_PORT=3131 npm run smoke:e2e
+SMOKE_POSE_PORT=8131 npm run smoke:e2e
+SMOKE_PYTHON=python/.venv/bin/python npm run smoke:e2e
+SMOKE_PHRASE_ID=family npm run smoke:e2e
+```
+
+If the test fails before the Python server becomes ready, install the Python
+dependencies first:
+
+```bash
+cd python
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+cd ..
 ```
 
 ## Session rooms

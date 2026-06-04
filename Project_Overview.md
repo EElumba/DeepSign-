@@ -39,15 +39,15 @@ A single-page HTML/JS app. No framework, no build step. The UI has:
 1. User clicks "Start" → browser requests mic permission
 2. Raw 16 kHz PCM audio is captured via `AudioContext.createScriptProcessor`
 3. Audio chunks are streamed to the Node server over a room WebSocket at `/ws/audio/<room-id>`
-4. The server sends back binary `.pose` blobs to display clients in that same room
-5. Each blob is fed to the `<pose-viewer>` web component, which animates a skeleton avatar signing the phrase
-6. Phrases are queued so the avatar signs them in order
+4. The server sends pose chunk metadata plus binary `.pose` clips to display clients in that same room
+5. Each clip is fed to the `<pose-viewer>` web component as soon as the tiny playback buffer is ready
+6. Chunks are queued so the avatar signs them in stream order
 7. Transcript text (from Deepgram) is shown above the avatar in real time
 
 Hackathon/demo fallback: the panel also renders curated no-mic phrase buttons
-from `/api/demo/phrases`. Clicking a phrase posts to `/api/demo/pose`, generates
-a pose via the Python server, and broadcasts transcript + pose to all display
-clients in the same room, including paired glasses.
+from `/api/demo/phrases`. Clicking a phrase posts to `/api/demo/pose`, streams
+pose chunks via the Python server, and broadcasts transcript + pose events to
+all display clients in the same room, including paired glasses.
 
 ### Sign → Speak Panel
 
@@ -61,8 +61,12 @@ clients in the same room, including paired glasses.
    - Final still frames are kept so end holds remain part of the sign
    - Buffer is force-flushed after 120 frames (~4 seconds)
 5. The buffered frames (each as `{left_hand, right_hand}` 21×3 arrays) are POSTed to `/api/recognize`
-6. If confidence ≥ 0.45, the recognized gloss word is appended to a running list
-7. After 2.5 seconds of silence (no new glosses), the accumulated ASL gloss is:
+6. If confidence ≥ 0.45, the recognized gloss is shown as a removable word chip
+   with confidence when available
+7. Users can remove a chip, undo the removal, or choose a better top-5 candidate
+   from the recognizer before confirming the phrase
+8. After 2.5 seconds of silence (no new glosses), or when the user clicks "Use Phrase",
+   the accumulated ASL gloss is:
    - Translated to natural English via `/api/gloss-to-english` (OpenAI)
    - Spoken aloud via `/api/tts` (ElevenLabs TTS)
 
@@ -83,7 +87,10 @@ Built with Express + the `ws` WebSocket library. Runs on port 3000.
 | `ELEVENLABS_VOICE_ID` | Default Rachel voice. |
 | `POSE_SERVER_URL` | Default `http://localhost:8000`. Python server URL. |
 | `GLOSS_TIMEOUT_MS` | Default 1500ms. OpenAI timeout; falls back gracefully. |
-| `FINAL_FLUSH_DELAY_MS` | Default 120ms. Safety flush delay for partial utterances. |
+| `STREAM_CHUNK_TARGET_WORDS` | Default 3. Normal finalized-word chunk size for live signing. |
+| `STREAM_CHUNK_MAX_WORDS` | Default 5. Largest forced chunk at speech end/disconnect. |
+| `STREAM_CHUNK_IDLE_MS` | Default 80ms. Flush delay for a short leftover finalized chunk. |
+| `STREAM_OPENAI_GLOSS` | Default off. Set `1` to use OpenAI for streaming chunk glossing. |
 
 ### Session Rooms and WebSocket Connection Types
 
@@ -106,23 +113,32 @@ When a browser connects via `/ws/audio/<room-id>`:
 3. Deepgram fires `Transcript` events with interim + final results
 4. Interim and final transcript messages are sent only to display clients in the same room
 5. **Only finalized words** feed the pose pipeline (interim words may change)
-6. Words are buffered up to 16 words or until Deepgram signals `speech_final`
-7. The buffered phrase is **glossed to ASL** via OpenAI GPT then **posed** by the Python server
-8. The resulting pose blob is sent only to display clients in that same room
+6. Finalized words are chunked into small signable units, normally 1-3 words
+7. Each chunk is incrementally glossed, posed by the Python server, and sent as soon as it is ready
+8. Display clients receive JSON pose metadata followed by the binary `.pose` clip
+9. The browser keeps a tiny playback buffer and progressively renders clips in order
 
-### Speak → Sign Pipeline (per utterance)
+### Speak → Sign Pipeline (streaming)
 
 ```
-Deepgram final transcript
+Deepgram final transcript chunk
   → expandDigitsForSigning()   (e.g. "3" → "three")
-  → englishToAslGloss()        (OpenAI GPT: English → ASL gloss grammar)
-  → generatePose()             (Python /pose endpoint → .pose binary)
-  → broadcastToRoom()          (sends binary to display clients in that room)
+  → incrementalEnglishToAslGlossResult()
+       default: local low-latency gloss
+       optional: OpenAI GPT with STREAM_OPENAI_GLOSS=1
+  → generatePose()             (Python /pose endpoint → .pose binary clip)
+  → broadcast pose metadata
+  → broadcast binary clip
+  → display playback buffer
+  → pose-viewer render
 ```
 
 An LRU gloss cache (default 128 entries) avoids redundant OpenAI calls for repeated phrases.
 
-Pose generation is **serialized per audio connection** via a promise chain so clips from one speaker broadcast in order. Multiple rooms can run simultaneously. Multiple audio clients in the same room are allowed; their completed utterances may interleave at utterance boundaries.
+Pose generation is **serialized per audio connection** via a promise chain so
+chunks from one speaker broadcast in order. Multiple rooms can run
+simultaneously. Multiple audio clients in the same room are allowed; their
+chunks may interleave at chunk boundaries.
 
 ### ASL Gloss Prompt (sent to OpenAI)
 
@@ -175,7 +191,11 @@ After the CLI generates a pose, a **postprocessing pipeline** runs:
 - Adds normalized left/right wrist trajectory and hand visibility signals
 - Runs a fast cosine-similarity pass against all lexicon means to shortlist candidates
 - Reranks the top candidates with banded DTW over the temporal templates
-- Returns `{"gloss": "word", "confidence": 0.xx, "mean_confidence": 0.xx, "temporal_confidence": 0.xx}`
+- Returns the winning gloss plus optional top-5 reranked candidates:
+  `{"gloss": "word", "confidence": 0.xx, "mean_confidence": 0.xx, "temporal_confidence": 0.xx, "candidates": [{"gloss": "word", "confidence": 0.xx, "mean_confidence": 0.xx, "temporal_confidence": 0.xx}]}`
+- The browser also accepts future-compatible candidate field names such as
+  `alternatives`, `top_candidates`, or `top5`, and candidate labels named
+  `gloss`, `word`, `label`, `text`, or `value`.
 
 #### `GET /health`
 - Returns `{"status": "ok"}`
@@ -273,12 +293,13 @@ Since WLASL clips come from different source videos (different frame sizes), thi
 Microphone (browser)
   → PCM audio chunks (WebSocket /ws/audio/<room-id>)
   → Deepgram nova-3 (cloud STT)
-  → Final transcript text
+  → Final transcript chunks
   → expandDigitsForSigning() (e.g. "3" → "three")
-  → OpenAI GPT-4o-mini (English → ASL gloss)
-  → Python /pose (text_to_gloss_to_pose CLI + postprocessing)
-  → .pose binary (WebSocket /ws/display/<room-id>)
-  → <pose-viewer> web component (skeleton avatar animation)
+  → incremental local gloss (OpenAI optional via STREAM_OPENAI_GLOSS=1)
+  → Python /pose (cached lexicon lookup + postprocessing)
+  → pose metadata + .pose binary clip (WebSocket /ws/display/<room-id>)
+  → browser playback buffer
+  → <pose-viewer> web component (progressive skeleton avatar animation)
 ```
 
 ### Speak → Sign (demo path)
@@ -286,9 +307,10 @@ Microphone (browser)
 ```
 Curated phrase button
   → POST /api/demo/pose with roomId + phraseId
-  → optional OpenAI gloss fallback to raw phrase
-  → Python /pose
-  → transcript JSON + .pose binary broadcast to /ws/display/<room-id>
+  → streaming text chunks
+  → incremental gloss
+  → Python /pose per chunk
+  → transcript/gloss/pose metadata + .pose clips broadcast to /ws/display/<room-id>
 ```
 
 ### Sign → Speak (full path)

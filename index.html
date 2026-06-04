@@ -46,7 +46,7 @@
     }
     .mode-btn.active { color: #fff; background: #2471a3; border-color: #2471a3; }
 
-    .trust-strip, .service-notice, .pairing-panel {
+    .trust-strip, .service-notice, .pairing-panel, .demo-status-drawer {
       border: 1px solid #2a2a2a;
       background: rgba(255,255,255,0.06);
       border-radius: 6px;
@@ -67,6 +67,106 @@
       overflow-wrap: anywhere;
     }
     .service-notice.visible { display: block; }
+    .demo-status-drawer {
+      overflow: hidden;
+      font-size: 12px;
+    }
+    .demo-status-drawer summary {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 9px 10px;
+      cursor: pointer;
+      list-style: none;
+      font-weight: 800;
+    }
+    .demo-status-drawer summary::-webkit-details-marker { display: none; }
+    .summary-pill {
+      padding: 4px 7px;
+      border: 1px solid #444;
+      border-radius: 999px;
+      color: #ddd;
+      background: #161616;
+      font-size: 11px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .summary-pill.is-ok {
+      color: #dfffe8;
+      border-color: rgba(46,204,113,0.65);
+      background: rgba(46,204,113,0.12);
+    }
+    .summary-pill.is-warn {
+      color: #fff3ad;
+      border-color: rgba(255,225,77,0.55);
+      background: rgba(255,225,77,0.1);
+    }
+    .summary-pill.is-bad {
+      color: #ffe5e1;
+      border-color: rgba(231,76,60,0.65);
+      background: rgba(231,76,60,0.12);
+    }
+    .status-list {
+      display: grid;
+      gap: 1px;
+      border-top: 1px solid #242424;
+    }
+    .status-row {
+      display: grid;
+      grid-template-columns: 12px minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 10px;
+      background: rgba(0,0,0,0.16);
+      min-width: 0;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #777;
+    }
+    .status-row.is-ok .status-dot { background: #2ecc71; }
+    .status-row.is-warn .status-dot { background: #ffe14d; }
+    .status-row.is-bad .status-dot { background: #e74c3c; }
+    .status-row.is-pending .status-dot { background: #4aa3ff; }
+    .status-row.is-idle .status-dot { background: #999; }
+    .status-main {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+    .status-label {
+      color: #f4f4f4;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .status-detail {
+      color: #aaa;
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .status-value {
+      color: #ddd;
+      font-size: 11px;
+      font-weight: 800;
+      white-space: nowrap;
+      max-width: 138px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .status-note {
+      padding: 8px 10px 10px;
+      color: #aaa;
+      border-top: 1px solid #242424;
+      font-size: 11px;
+      line-height: 1.35;
+    }
     .pairing-panel {
       display: grid;
       gap: 10px;
@@ -205,7 +305,7 @@
 
     .demo-panel {
       display: grid;
-      gap: 5px;
+      gap: 7px;
       min-width: 0;
     }
     .demo-grid {
@@ -215,18 +315,50 @@
       min-width: 0;
     }
     .demo-btn {
-      padding: 8px 6px;
+      display: grid;
+      gap: 3px;
+      align-content: center;
+      padding: 8px 7px;
       font-size: 12px;
       line-height: 1.2;
       background: #202020;
       border: 1px solid #444;
       border-radius: 6px;
       color: #f5f5f5;
-      min-height: 38px;
+      min-height: 70px;
+      text-align: left;
+    }
+    .demo-btn:hover:not(:disabled) {
+      border-color: #6a6a6a;
+      background: #262626;
     }
     .demo-btn:focus-visible {
       outline: 3px solid #ffe14d;
       outline-offset: 2px;
+    }
+    .demo-category {
+      color: #ffe14d;
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .demo-label {
+      color: #fff;
+      font-size: 13px;
+      font-weight: 800;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .demo-text {
+      color: #bdbdbd;
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     #demoStatus {
       min-height: 1.3em;
@@ -259,6 +391,196 @@
       background: #111; border-radius: 6px;
     }
 
+    .recognition-chips {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      min-height: 44px;
+      padding: 6px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 6px;
+    }
+    .recognition-empty {
+      color: #aaa;
+      font-size: 12px;
+      padding: 4px 2px;
+    }
+    .recognition-chip {
+      display: inline-grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: stretch;
+      max-width: 100%;
+      border: 1px solid rgba(46,204,113,0.55);
+      border-radius: 6px;
+      background: rgba(46,204,113,0.14);
+      overflow: hidden;
+    }
+    .recognition-chip.is-low {
+      border-color: rgba(255,225,77,0.55);
+      background: rgba(255,225,77,0.12);
+    }
+    .recognition-chip.is-corrected {
+      border-color: rgba(74,163,255,0.65);
+      background: rgba(74,163,255,0.14);
+    }
+    .chip-main,
+    .chip-remove,
+    .candidate-btn {
+      border-radius: 0;
+      font-family: monospace;
+    }
+    .chip-main {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      min-width: 0;
+      padding: 7px 8px;
+      color: #fff;
+      background: transparent;
+      border: 0;
+      font-size: 13px;
+      line-height: 1.1;
+      text-align: left;
+    }
+    .chip-word {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 800;
+    }
+    .chip-confidence {
+      color: #ddd;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .chip-remove {
+      width: 30px;
+      min-width: 30px;
+      padding: 0;
+      color: #f5f5f5;
+      background: rgba(0,0,0,0.22);
+      border: 0;
+      border-left: 1px solid rgba(255,255,255,0.14);
+      font-size: 16px;
+      line-height: 1;
+    }
+    .recognition-notice,
+    .recognition-error {
+      display: none;
+      gap: 8px;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 32px;
+      padding: 7px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .recognition-notice.visible,
+    .recognition-error.visible {
+      display: flex;
+    }
+    .recognition-notice {
+      color: #dfffe8;
+      background: rgba(46,204,113,0.09);
+      border: 1px solid rgba(46,204,113,0.35);
+    }
+    .recognition-error {
+      color: #ffe5e1;
+      background: rgba(231,76,60,0.1);
+      border: 1px solid rgba(231,76,60,0.4);
+    }
+    .inline-action {
+      padding: 5px 8px;
+      font-size: 11px;
+      background: #333;
+      border: 1px solid #555;
+      border-radius: 6px;
+      color: #fff;
+      white-space: nowrap;
+    }
+    .correction-panel {
+      display: grid;
+      gap: 8px;
+      padding: 9px;
+      border: 1px solid #333;
+      border-radius: 6px;
+      background: rgba(255,255,255,0.06);
+    }
+    .correction-panel[hidden] { display: none; }
+    .correction-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .correction-title {
+      min-width: 0;
+      color: #f4f4f4;
+      font-size: 13px;
+      font-weight: 800;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .candidate-list {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+    .candidate-btn {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 8px;
+      color: #f5f5f5;
+      background: #202020;
+      border: 1px solid #444;
+      border-radius: 6px;
+      font-size: 12px;
+      text-align: left;
+    }
+    .candidate-btn.selected {
+      border-color: #4aa3ff;
+      background: rgba(74,163,255,0.16);
+    }
+    .candidate-word {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 800;
+    }
+    .candidate-confidence {
+      color: #ccc;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .candidate-empty {
+      color: #aaa;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .correction-actions {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .correction-note {
+      color: #aaa;
+      font-size: 11px;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     #english-output {
       font-size: 15px; font-weight: 600; min-height: 1.8em;
       background: rgba(46,204,113,0.08); border-radius: 6px;
@@ -276,8 +598,10 @@
     }
     #micBtn    { background: #2ecc71; }
     #cameraBtn { background: #2ecc71; }
+    #useGlossBtn, #useCandidateBtn { background: #2471a3; }
     #micBtn.recording, #cameraBtn.recording { background: #e74c3c; }
     #resetBtn, #signResetBtn { background: #555; }
+    .sign-controls { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr); }
     button:disabled { opacity: 0.45; cursor: default; }
     button:focus-visible {
       outline: 3px solid #ffe14d;
@@ -287,7 +611,9 @@
     @media (max-width: 430px) {
       #mode-bar,
       .demo-grid,
-      .controls {
+      .controls,
+      .sign-controls,
+      .correction-actions {
         grid-template-columns: 1fr;
       }
       .pairing-header,
@@ -343,6 +669,15 @@
     </div>
   </section>
 
+  <details id="demoStatusDrawer" class="demo-status-drawer">
+    <summary>
+      <span>Demo status</span>
+      <span id="demoReadinessSummary" class="summary-pill">Checking</span>
+    </summary>
+    <div id="demoChecklist" class="status-list" role="list"></div>
+    <div class="status-note">Live checks only. Demo phrases are curated samples, not a claim of certified interpretation accuracy.</div>
+  </details>
+
   <div id="mode-bar" role="tablist" aria-label="Translation mode">
     <button id="speakModeBtn" class="mode-btn active" type="button" role="tab" aria-selected="true" aria-controls="speak-panel">Speak to Sign</button>
     <button id="signModeBtn" class="mode-btn" type="button" role="tab" aria-selected="false" aria-controls="sign-panel">Sign to Speak</button>
@@ -366,10 +701,24 @@
   <section id="sign-panel" role="tabpanel" aria-labelledby="signModeBtn" hidden style="display:none; flex-direction:column; gap:10px;">
     <div id="sign-status" role="status" aria-live="polite">Start camera then sign a word.</div>
     <canvas id="signCanvas" width="640" height="480" role="img" aria-label="Camera preview with detected hand landmarks"></canvas>
-    <div id="gloss-display" class="info-line" role="log" aria-live="polite" aria-label="Recognized ASL gloss words" title="Recognized gloss words"></div>
+    <div id="recognition-error" class="recognition-error" role="status" aria-live="polite"></div>
+    <div id="gloss-display" class="recognition-chips" role="list" aria-live="polite" aria-label="Recognized ASL gloss words" title="Recognized gloss words"></div>
+    <div id="recognition-notice" class="recognition-notice" role="status" aria-live="polite"></div>
+    <div id="correction-panel" class="correction-panel" hidden>
+      <div class="correction-header">
+        <div id="correction-title" class="correction-title">Correction</div>
+        <button id="closeCorrectionBtn" class="inline-action" type="button">Done</button>
+      </div>
+      <div id="candidate-list" class="candidate-list" role="listbox" aria-label="Recognition candidates"></div>
+      <div class="correction-actions">
+        <div id="correction-note" class="correction-note"></div>
+        <button id="useCandidateBtn" type="button" disabled>Use this instead</button>
+      </div>
+    </div>
     <div id="english-output" role="status" aria-live="polite" aria-label="Spoken English output"></div>
-    <div class="controls">
+    <div class="controls sign-controls">
       <button id="cameraBtn" type="button">Start Camera</button>
+      <button id="useGlossBtn" type="button" disabled>Use Phrase</button>
       <button id="signResetBtn" type="button">Reset</button>
     </div>
   </section>
@@ -403,12 +752,248 @@ const qrPlaceholder = document.getElementById('qrPlaceholder');
 const glassesLinkInput = document.getElementById('glassesLinkInput');
 const pairingMeta = document.getElementById('pairingMeta');
 const copyGlassesBtn = document.getElementById('copyGlassesBtn');
+const demoReadinessSummary = document.getElementById('demoReadinessSummary');
+const demoChecklistEl = document.getElementById('demoChecklist');
 let glassesUrl = `${location.origin}/glasses?room=${encodeURIComponent(roomId)}`;
 let pairingHasConnected = false;
 let pairingExpiresAt = null;
 
 roomLabel.textContent = roomId.slice(0, 8);
 glassesLinkInput.value = glassesUrl;
+
+function initialMicStatus() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return {
+      state: 'bad',
+      value: 'Unavailable',
+      detail: 'This browser cannot capture microphone audio.',
+    };
+  }
+  return {
+    state: 'warn',
+    value: 'Needs permission',
+    detail: 'Permission is requested when Start is pressed.',
+  };
+}
+
+const demoState = {
+  pose: {
+    label: 'Pose server',
+    state: 'pending',
+    value: 'Checking',
+    detail: 'Python signing service',
+  },
+  mic: {
+    label: 'Microphone',
+    ...initialMicStatus(),
+  },
+  speech: {
+    label: 'Speech recognition',
+    state: 'pending',
+    value: 'Checking',
+    detail: 'Live speech-to-text configuration',
+  },
+  glasses: {
+    label: 'Glasses pairing',
+    state: 'warn',
+    value: 'Unpaired',
+    detail: 'Scan the QR code to connect the glasses display.',
+  },
+  session: {
+    label: 'Room/session',
+    state: 'pending',
+    value: 'Connecting',
+    detail: `Room ${roomId.slice(0, 8)}`,
+  },
+  avatar: {
+    label: 'Avatar playback',
+    state: 'idle',
+    value: 'Idle',
+    detail: 'Waiting for speech or a demo phrase.',
+  },
+  latency: {
+    label: 'Pipeline latency',
+    state: 'idle',
+    value: 'No data',
+    detail: 'Waiting for the first timed pipeline stage.',
+  },
+  error: {
+    label: 'Last pipeline error',
+    state: 'ok',
+    value: 'None',
+    detail: 'No room-level pipeline failures recorded.',
+  },
+};
+let micPermissionGranted = false;
+
+function readinessSummary() {
+  const poseReady = demoState.pose.state === 'ok';
+  const speechReady = demoState.speech.state === 'ok';
+  const sessionReady = demoState.session.state === 'ok';
+  const micBlocked = demoState.mic.state === 'bad';
+
+  if (poseReady && speechReady && sessionReady && !micBlocked) {
+    return { state: 'ok', text: 'Live demo ready' };
+  }
+  if (poseReady && sessionReady) {
+    return { state: 'warn', text: 'Demo phrases ready' };
+  }
+  return { state: 'bad', text: 'Setup needed' };
+}
+
+function renderDemoChecklist() {
+  const summary = readinessSummary();
+  demoReadinessSummary.textContent = summary.text;
+  demoReadinessSummary.className = `summary-pill is-${summary.state}`;
+
+  demoChecklistEl.textContent = '';
+  Object.values(demoState).forEach((item) => {
+    const row = document.createElement('div');
+    row.className = `status-row is-${item.state}`;
+    row.setAttribute('role', 'listitem');
+
+    const dotEl = document.createElement('span');
+    dotEl.className = 'status-dot';
+    dotEl.setAttribute('aria-hidden', 'true');
+
+    const mainEl = document.createElement('span');
+    mainEl.className = 'status-main';
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'status-label';
+    labelEl.textContent = item.label;
+
+    const detailEl = document.createElement('span');
+    detailEl.className = 'status-detail';
+    detailEl.textContent = item.detail;
+
+    const valueEl = document.createElement('span');
+    valueEl.className = 'status-value';
+    valueEl.textContent = item.value;
+
+    mainEl.append(labelEl, detailEl);
+    row.append(dotEl, mainEl, valueEl);
+    demoChecklistEl.appendChild(row);
+  });
+}
+
+function setDemoState(key, patch) {
+  Object.assign(demoState[key], patch);
+  renderDemoChecklist();
+}
+
+const METRIC_STAGE_LABELS = {
+  speech_transcription: 'Speech transcription',
+  transcript_chunk: 'Transcript chunking',
+  text_normalization: 'Text normalization',
+  incremental_gloss: 'Incremental gloss',
+  gloss: 'Text-to-sign gloss',
+  pose_generation: 'Pose generation',
+  pose_streaming: 'Pose streaming',
+  alias_resolution: 'Alias resolution',
+  simple_gloss: 'Simple glosser',
+  pose_library_import: 'Pose library import',
+  pose_lookup_init: 'Pose lookup init',
+  wlasl_lookup: 'WLASL lookup',
+  motion_generation: 'Motion generation',
+  pose_processing: 'Pose processing',
+  body_stabilization: 'Body stabilization',
+  face_stabilization: 'Face stabilization',
+  face_simplification: 'Face simplification',
+  avatar_shift: 'Avatar positioning',
+  pose_serialization: 'Pose serialization',
+  pose_parse: 'Pose parsing',
+  pose_file_read: 'Pose file read',
+  subprocess_generation: 'Pose subprocess',
+  network_transfer: 'Network transfer',
+  response_body_read: 'Pose transfer read',
+  json_serialization: 'JSON serialization',
+  playback_buffer: 'Playback buffer',
+  avatar_playback_start: 'Avatar start',
+  recognition: 'Recognition',
+  gloss_to_english: 'Gloss-to-English',
+  tts: 'TTS',
+};
+
+function formatLatency(ms) {
+  const value = Number(ms);
+  if (!Number.isFinite(value)) return 'No data';
+  if (value < 1000) return `${Math.round(value)} ms`;
+  return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)} s`;
+}
+
+function latestTimingFromSnapshot(metrics) {
+  const timings = metrics?.timings || {};
+  return Object.entries(timings)
+    .filter(([, timing]) => Number.isFinite(Number(timing.lastMs)) && timing.updatedAt)
+    .sort((a, b) => String(b[1].updatedAt).localeCompare(String(a[1].updatedAt)))[0] || null;
+}
+
+function applyMetricsSnapshot(metrics, roomSnapshot = null) {
+  const latest = latestTimingFromSnapshot(metrics);
+  if (latest) {
+    const [stage, timing] = latest;
+    const label = METRIC_STAGE_LABELS[stage] || stage.replaceAll('_', ' ');
+    setDemoState('latency', {
+      state: timing.status === 'ok' || timing.status === 'cache' ? 'ok' : 'warn',
+      value: formatLatency(timing.lastMs),
+      detail: `${label} - avg ${formatLatency(timing.avgMs)} over ${timing.count}`,
+    });
+  }
+
+  const lastError = roomSnapshot?.lastError || metrics?.lastError;
+  if (lastError) {
+    setDemoState('error', {
+      state: 'bad',
+      value: lastError.category || 'Error',
+      detail: `${lastError.route || 'pipeline'} - ${lastError.status || 'error'}`,
+    });
+  } else {
+    setDemoState('error', {
+      state: 'ok',
+      value: 'None',
+      detail: 'No room-level pipeline failures recorded.',
+    });
+  }
+}
+
+async function refreshMicPermissionStatus() {
+  if (!navigator.permissions || !navigator.permissions.query || demoState.mic.state === 'bad') return;
+  try {
+    const permission = await navigator.permissions.query({ name: 'microphone' });
+    const applyPermission = () => {
+      if (permission.state === 'granted') {
+        micPermissionGranted = true;
+        setDemoState('mic', {
+          state: 'ok',
+          value: 'Available',
+          detail: recording ? 'Microphone stream is active.' : 'Permission granted; currently stopped.',
+        });
+      } else if (permission.state === 'denied') {
+        micPermissionGranted = false;
+        setDemoState('mic', {
+          state: 'bad',
+          value: 'Blocked',
+          detail: 'Browser permission is denied.',
+        });
+      } else {
+        micPermissionGranted = false;
+        setDemoState('mic', {
+          state: 'warn',
+          value: 'Needs permission',
+          detail: 'Permission is requested when Start is pressed.',
+        });
+      }
+    };
+    applyPermission();
+    permission.onchange = applyPermission;
+  } catch (e) {
+    // Some browsers do not expose microphone permission state.
+  }
+}
+
+renderDemoChecklist();
+refreshMicPermissionStatus();
 
 copyGlassesBtn.addEventListener('click', async () => {
   const original = copyGlassesBtn.textContent;
@@ -457,6 +1042,11 @@ function renderPairingPresence(glassesConnected) {
       'Glasses connected',
       'You are paired. Start speaking here or on the glasses.'
     );
+    setDemoState('glasses', {
+      state: 'ok',
+      value: 'Paired',
+      detail: 'Glasses display is connected to this room.',
+    });
     return;
   }
 
@@ -466,12 +1056,22 @@ function renderPairingPresence(glassesConnected) {
       'Connection lost',
       'The glasses disconnected. Reopen the glasses page or scan the QR code again.'
     );
+    setDemoState('glasses', {
+      state: 'bad',
+      value: 'Disconnected',
+      detail: 'Reconnect the glasses page or scan the QR code again.',
+    });
   } else {
     setPairingState(
       'waiting',
       'Waiting for glasses',
       'Scan this code from the glasses to join this room.'
     );
+    setDemoState('glasses', {
+      state: 'warn',
+      value: 'Unpaired',
+      detail: 'Scan the QR code to connect the glasses display.',
+    });
   }
 }
 
@@ -539,30 +1139,92 @@ const poseQueue = [];
 let currentUrl  = null;
 let playing     = false;
 let watchdog    = null;
+let playbackStartTimer = null;
 let displayWS   = null;
 let demoBusy    = false;
 let poseServiceReachable = true;
+let pendingPoseMetric = null;
+const pendingPoseMetadata = [];
 const WATCHDOG_MS = 30000;
+const PLAYBACK_START_BUFFER_MS = 70;
+const PLAYBACK_START_BUFFER_POSES = 2;
+const HEALTH_POLL_MS = 15000;
+const AUDIO_PROCESSOR_BUFFER_SIZE = 1024;
 
-function enqueuePose(blob) {
-  poseQueue.push(URL.createObjectURL(blob));
-  if (!playing) playNext();
+function schedulePlaybackStart() {
+  if (playing || !poseQueue.length) return;
+  if (poseQueue.length >= PLAYBACK_START_BUFFER_POSES) {
+    if (playbackStartTimer) {
+      clearTimeout(playbackStartTimer);
+      playbackStartTimer = null;
+    }
+    playNext();
+    return;
+  }
+  if (playbackStartTimer) return;
+  playbackStartTimer = setTimeout(() => {
+    playbackStartTimer = null;
+    if (!playing && poseQueue.length) playNext();
+  }, PLAYBACK_START_BUFFER_MS);
+}
+
+function enqueuePose(blob, metadata = null) {
+  const poseMeta = metadata || pendingPoseMetadata.shift() || pendingPoseMetric || {};
+  if (pendingPoseMetric && poseMeta.pipelineId === pendingPoseMetric.pipelineId) {
+    pendingPoseMetric = null;
+  }
+  const entry = {
+    url: URL.createObjectURL(blob),
+    receivedAt: performance.now(),
+    pipelineId: poseMeta.pipelineId || null,
+    streamId: poseMeta.streamId || null,
+    sequence: Number.isFinite(Number(poseMeta.sequence)) ? Number(poseMeta.sequence) : null,
+    chunkId: poseMeta.chunkId || null,
+    gloss: poseMeta.gloss || '',
+  };
+  poseQueue.push(entry);
+  setDemoState('avatar', {
+    state: playing ? 'ok' : 'pending',
+    value: playing ? `Queued (${poseQueue.length})` : 'Loading',
+    detail: 'A sign clip arrived for avatar playback.',
+  });
+  schedulePlaybackStart();
 }
 
 function clearPoseQueue() {
-  while (poseQueue.length) URL.revokeObjectURL(poseQueue.shift());
+  while (poseQueue.length) URL.revokeObjectURL(poseQueue.shift().url);
+  pendingPoseMetadata.length = 0;
 }
 
 function playNext() {
+  if (playbackStartTimer) { clearTimeout(playbackStartTimer); playbackStartTimer = null; }
   if (watchdog) { clearTimeout(watchdog); watchdog = null; }
   if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
-  if (!poseQueue.length) { playing = false; stopSigning(); return; }
+  if (!poseQueue.length) {
+    playing = false;
+    stopSigning();
+    setDemoState('avatar', {
+      state: 'idle',
+      value: 'Idle',
+      detail: 'Playback complete.',
+    });
+    return;
+  }
   playing = true;
-  currentUrl = poseQueue.shift();
-  const url = currentUrl;
+  const entry = poseQueue.shift();
+  currentUrl = entry.url;
+  const url = entry.url;
   const apply = () => {
+    const bufferedMs = performance.now() - entry.receivedAt;
+    sendDisplayMetric('playback_buffer', bufferedMs, entry.pipelineId);
     signer.src = url;
     try { if (typeof signer.play === 'function') signer.play(); } catch (e) {}
+    sendDisplayMetric('avatar_playback_start', performance.now() - entry.receivedAt, entry.pipelineId);
+    setDemoState('avatar', {
+      state: 'ok',
+      value: poseQueue.length ? `Playing + ${poseQueue.length}` : 'Playing',
+      detail: 'Sign clip is live on the avatar.',
+    });
     watchdog = setTimeout(playNext, WATCHDOG_MS);
   };
   if (window.customElements && customElements.whenDefined) {
@@ -577,6 +1239,7 @@ function stopSigning() {
 }
 
 function resetSigning(notifyServer = true) {
+  if (playbackStartTimer) { clearTimeout(playbackStartTimer); playbackStartTimer = null; }
   if (watchdog) { clearTimeout(watchdog); watchdog = null; }
   clearPoseQueue();
   if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
@@ -584,8 +1247,28 @@ function resetSigning(notifyServer = true) {
   stopSigning();
   transcriptEl.textContent = '';
   demoStatusEl.textContent = '';
+  setDemoState('avatar', {
+    state: 'idle',
+    value: 'Idle',
+    detail: 'Playback reset.',
+  });
   if (notifyServer && displayWS && displayWS.readyState === WebSocket.OPEN) {
     displayWS.send(JSON.stringify({ type: 'reset' }));
+  }
+}
+
+function sendDisplayMetric(event, durationMs, pipelineId = null) {
+  if (!displayWS || displayWS.readyState !== WebSocket.OPEN) return;
+  try {
+    displayWS.send(JSON.stringify({
+      type: 'metrics',
+      event,
+      durationMs,
+      pipelineId,
+      status: 'ok',
+    }));
+  } catch (e) {
+    // Metrics are best-effort developer telemetry.
   }
 }
 
@@ -600,12 +1283,42 @@ function handleDisplayMessage(event) {
   } else {
     let msg; try { msg = JSON.parse(event.data); } catch (e) { return; }
     if (msg.type === 'transcript') transcriptEl.textContent = msg.text;
+    else if (msg.type === 'transcript_chunk') {
+      if (msg.text) demoStatusEl.textContent = `Signing chunk ${msg.sequence || ''}`.trim();
+    }
+    else if (msg.type === 'gloss') {
+      if (msg.gloss) demoStatusEl.textContent = `Gloss ${msg.gloss}`;
+    }
+    else if (msg.type === 'pose' && msg.event === 'chunk') {
+      pendingPoseMetadata.push(msg);
+      setDemoState('avatar', {
+        state: playing ? 'ok' : 'pending',
+        value: playing ? `Queued (${poseQueue.length})` : 'Buffering',
+        detail: msg.gloss ? `Preparing ${msg.gloss}` : 'Preparing sign chunk.',
+      });
+    }
     else if (msg.type === 'reset') resetSigning(false);
     else if (msg.type === 'pairing') renderPairingPresence(Boolean(msg.glassesConnected));
+    else if (msg.type === 'metrics') {
+      applyMetricsSnapshot(msg.metrics);
+      if (msg.event?.kind === 'timing'
+          && msg.event.stage === 'pose_generation'
+          && msg.event.status === 'ok'
+          && msg.event.pipelineId) {
+        pendingPoseMetric = { pipelineId: msg.event.pipelineId };
+      }
+    }
     else if (msg.type === 'error') {
       const text = msg.text || msg.error || 'Service unavailable.';
       setStatus('error', text);
       transcriptEl.textContent = text;
+      if (msg.scope === 'pose') {
+        setDemoState('avatar', {
+          state: 'bad',
+          value: 'Unavailable',
+          detail: text,
+        });
+      }
     }
   }
 }
@@ -624,10 +1337,20 @@ function connectDisplay() {
   displayWS.binaryType = 'arraybuffer';
   displayWS.onopen = () => {
     setStatus('live', `Live · ${roomId.slice(0, 6)}`);
+    setDemoState('session', {
+      state: 'ok',
+      value: 'Live',
+      detail: `Room ${roomId.slice(0, 8)} connected.`,
+    });
     renderPairingPresence(false);
   };
   displayWS.onclose = () => {
     setStatus('error', 'Reconnecting');
+    setDemoState('session', {
+      state: 'warn',
+      value: 'Reconnecting',
+      detail: `Room ${roomId.slice(0, 8)} display socket is reconnecting.`,
+    });
     setPairingState(
       'lost',
       'Connection lost',
@@ -656,7 +1379,21 @@ function renderDemoPhrases(phrases) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'demo-btn';
-    button.textContent = phrase.label;
+    button.setAttribute('aria-label', `${phrase.category || 'Demo'}: ${phrase.text || phrase.label}`);
+
+    const category = document.createElement('span');
+    category.className = 'demo-category';
+    category.textContent = phrase.category || 'Demo';
+
+    const label = document.createElement('span');
+    label.className = 'demo-label';
+    label.textContent = phrase.label;
+
+    const text = document.createElement('span');
+    text.className = 'demo-text';
+    text.textContent = phrase.text || '';
+
+    button.append(category, label, text);
     button.addEventListener('click', () => playDemoPhrase(phrase));
     demoPhrasesEl.appendChild(button);
   });
@@ -669,6 +1406,7 @@ async function loadDemoPhrases() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const { enabled, phrases } = await response.json();
     renderDemoPhrases(enabled ? (phrases || []) : []);
+    if (!enabled) demoStatusEl.textContent = 'Demo phrases disabled.';
   } catch (e) {
     demoStatusEl.textContent = 'Demo phrases unavailable.';
   }
@@ -678,12 +1416,22 @@ async function playDemoPhrase(phrase) {
   if (demoBusy) return;
   if (!poseServiceReachable) {
     demoStatusEl.textContent = 'Pose server offline.';
+    setDemoState('avatar', {
+      state: 'bad',
+      value: 'Offline',
+      detail: 'Start the Python pose server before playing demo phrases.',
+    });
     return;
   }
 
   demoBusy = true;
   refreshDemoButtons();
   demoStatusEl.textContent = `Signing ${phrase.label}...`;
+  setDemoState('avatar', {
+    state: 'pending',
+    value: 'Generating',
+    detail: `Preparing "${phrase.label}" demo phrase.`,
+  });
 
   try {
     const response = await fetch('/api/demo/pose', {
@@ -695,10 +1443,20 @@ async function playDemoPhrase(phrase) {
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     transcriptEl.textContent = payload.text || phrase.text;
     demoStatusEl.textContent = payload.gloss ? `Gloss ${payload.gloss}` : 'Sent to display.';
+    setDemoState('avatar', {
+      state: 'pending',
+      value: 'Streaming',
+      detail: 'Pose generated; waiting for avatar playback.',
+    });
   } catch (e) {
     console.error('[Demo]', e);
     setStatus('error', 'Demo unavailable');
     demoStatusEl.textContent = e.message || 'Demo unavailable.';
+    setDemoState('avatar', {
+      state: 'bad',
+      value: 'Unavailable',
+      detail: e.message || 'Demo signing failed.',
+    });
   } finally {
     demoBusy = false;
     refreshDemoButtons();
@@ -714,12 +1472,30 @@ let micProcessor = null;
 
 async function loadServiceHealth() {
   try {
-    const response = await fetch('/api/health', { cache: 'no-store' });
+    const response = await fetch(`/api/health?room=${encodeURIComponent(roomId)}`, { cache: 'no-store' });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const health = await response.json();
     const services = health.services || {};
+    const roomSnapshot = health.room || null;
     const issues = [];
     poseServiceReachable = Boolean(services.pose?.reachable);
+    setDemoState('pose', {
+      state: poseServiceReachable ? 'ok' : 'bad',
+      value: poseServiceReachable ? 'Online' : 'Offline',
+      detail: poseServiceReachable
+        ? `Python signing service is reachable (${formatLatency(services.pose?.latencyMs)}).`
+        : `Python signing service is ${services.pose?.status || 'unreachable'}.`,
+    });
+    applyMetricsSnapshot(roomSnapshot?.metrics || health.metrics, roomSnapshot);
+
+    const speechConfigured = Boolean(services.deepgram?.configured);
+    setDemoState('speech', {
+      state: speechConfigured ? 'ok' : 'bad',
+      value: speechConfigured ? 'Configured' : 'Missing key',
+      detail: speechConfigured
+        ? 'Live speech recognition is configured.'
+        : 'DEEPGRAM_API_KEY is not set on the server.',
+    });
 
     if (!services.deepgram?.configured) {
       issues.push('Speech input unavailable until DEEPGRAM_API_KEY is configured.');
@@ -727,6 +1503,13 @@ async function loadServiceHealth() {
       micBtn.disabled = true;
       micBtn.textContent = 'Speech unavailable';
       micBtn.title = 'Set DEEPGRAM_API_KEY on the server to enable Speak to Sign.';
+    } else {
+      delete micBtn.dataset.serviceDisabled;
+      micBtn.title = '';
+      if (!recording) {
+        micBtn.disabled = false;
+        micBtn.textContent = 'Start';
+      }
     }
     if (!poseServiceReachable) {
       issues.push('Signing avatar service is offline; start the Python pose server.');
@@ -741,26 +1524,60 @@ async function loadServiceHealth() {
     setServiceNotice(issues);
     refreshDemoButtons();
   } catch (e) {
+    poseServiceReachable = false;
+    setDemoState('pose', {
+      state: 'bad',
+      value: 'Unknown',
+      detail: 'Service health endpoint could not be reached.',
+    });
+    setDemoState('speech', {
+      state: 'warn',
+      value: 'Unknown',
+      detail: 'Service health endpoint could not be reached.',
+    });
     setServiceNotice(['Service health could not be checked.']);
+    refreshDemoButtons();
   }
 }
 
 loadServiceHealth();
+setInterval(loadServiceHealth, HEALTH_POLL_MS);
 loadDemoPhrases();
 
 async function startMic() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     setStatus('error', 'Mic unavailable');
     transcriptEl.textContent = 'Microphone access is unavailable in this browser.';
+    setDemoState('mic', {
+      state: 'bad',
+      value: 'Unavailable',
+      detail: 'This browser cannot capture microphone audio.',
+    });
     return;
   }
+  setDemoState('mic', {
+    state: 'pending',
+    value: 'Requesting',
+    detail: 'Waiting for browser microphone permission.',
+  });
   try {
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (e) {
     console.error('Mic permission denied:', e);
     setStatus('error', 'Mic denied');
+    setDemoState('mic', {
+      state: 'bad',
+      value: 'Blocked',
+      detail: 'Microphone permission was denied.',
+    });
     return;
   }
+  micPermissionGranted = true;
+  setDemoState('mic', {
+    state: 'ok',
+    value: 'Available',
+    detail: 'Microphone stream is active.',
+  });
   micWs = new WebSocket(wsUrl('audio'));
   micWs.binaryType = 'arraybuffer';
   const activeMicWs = micWs;
@@ -787,7 +1604,7 @@ async function startMic() {
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   audioCtx     = new AudioCtx({ sampleRate: 16000 });
   micSource    = audioCtx.createMediaStreamSource(micStream);
-  micProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+  micProcessor = audioCtx.createScriptProcessor(AUDIO_PROCESSOR_BUFFER_SIZE, 1, 1);
   micProcessor.onaudioprocess = (e) => {
     if (!micWs || micWs.readyState !== 1) return;
     const float32 = e.inputBuffer.getChannelData(0);
@@ -810,6 +1627,21 @@ function stopMic() {
   recording = false;
   micBtn.textContent = micBtn.dataset.serviceDisabled === 'true' ? 'Speech unavailable' : 'Start';
   micBtn.classList.remove('recording');
+  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia && demoState.mic.state !== 'bad') {
+    if (micPermissionGranted) {
+      setDemoState('mic', {
+        state: 'ok',
+        value: 'Available',
+        detail: 'Permission granted; currently stopped.',
+      });
+    } else {
+      setDemoState('mic', {
+        state: 'warn',
+        value: 'Needs permission',
+        detail: 'Permission is requested when Start is pressed.',
+      });
+    }
+  }
   if (displayWS && displayWS.readyState === WebSocket.OPEN) {
     setStatus('live', `Live · ${roomId.slice(0, 6)}`);
   }
@@ -830,9 +1662,18 @@ const signCanvas    = document.getElementById('signCanvas');
 const signCtx       = signCanvas.getContext('2d');
 const signVideo     = document.getElementById('signVideo');
 const glossDisplay  = document.getElementById('gloss-display');
+const recognitionError = document.getElementById('recognition-error');
+const recognitionNotice = document.getElementById('recognition-notice');
+const correctionPanel = document.getElementById('correction-panel');
+const correctionTitle = document.getElementById('correction-title');
+const candidateList = document.getElementById('candidate-list');
+const correctionNote = document.getElementById('correction-note');
+const closeCorrectionBtn = document.getElementById('closeCorrectionBtn');
+const useCandidateBtn = document.getElementById('useCandidateBtn');
 const englishOutput = document.getElementById('english-output');
 const signStatus    = document.getElementById('sign-status');
 const cameraBtn     = document.getElementById('cameraBtn');
+const useGlossBtn   = document.getElementById('useGlossBtn');
 const signResetBtn  = document.getElementById('signResetBtn');
 
 const MIN_SIGN_FRAMES    = 10;    // ignore gestures shorter than this many frames
@@ -842,20 +1683,317 @@ const SIGN_PREROLL_FRAMES = 6;    // include setup handshape before movement sta
 const VELOCITY_THRESHOLD = 0.012; // normalized wrist movement to count as "active"
 const CONFIDENCE_MIN     = 0.45;  // recognition confidence gate
 const GLOSS_IDLE_MS      = 2500;  // silence after last gloss → translate + speak
+const MAX_RECOGNITION_CANDIDATES = 5;
 
 let holistic        = null;
 let signStream      = null;
 let signRunning     = false;
 let signFrameBuffer = [];
 let signPreRollFrames = [];
-let signGlosses     = [];
+let recognizedSigns = [];
 let signActive      = false;
 let signRestCount   = 0;
 let prevWrists      = null;
 let recognizing     = false;
 let glossTimer      = null;
+let recognitionIdSeq = 0;
+let selectedSignId = null;
+let pendingCandidate = null;
+let lastRemovedSign = null;
 
 function setSignStatus(msg) { signStatus.textContent = msg; }
+
+function formatGloss(value) {
+  return String(value || '').trim().replace(/_/g, ' ').replace(/\s+/g, ' ').toUpperCase();
+}
+
+function normalizeConfidence(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  if (value > 1) return Math.max(0, Math.min(1, value / 100));
+  return Math.max(0, Math.min(1, value));
+}
+
+function formatConfidence(value) {
+  const confidence = normalizeConfidence(value);
+  return confidence == null ? '' : `${Math.round(confidence * 100)}%`;
+}
+
+function normalizeCandidate(candidate) {
+  if (typeof candidate === 'string') {
+    const gloss = formatGloss(candidate);
+    return gloss ? { gloss, confidence: null } : null;
+  }
+  if (!candidate || typeof candidate !== 'object') return null;
+  const gloss = formatGloss(
+    candidate.gloss
+    || candidate.word
+    || candidate.label
+    || candidate.text
+    || candidate.value
+  );
+  if (!gloss) return null;
+  return {
+    gloss,
+    confidence: normalizeConfidence(
+      candidate.confidence
+      ?? candidate.score
+      ?? candidate.probability
+      ?? candidate.prob
+    ),
+    meanConfidence: normalizeConfidence(candidate.mean_confidence ?? candidate.meanConfidence),
+    temporalConfidence: normalizeConfidence(candidate.temporal_confidence ?? candidate.temporalConfidence),
+  };
+}
+
+function uniqueCandidates(candidates) {
+  const seen = new Set();
+  const unique = [];
+  for (const candidate of candidates) {
+    const normalized = normalizeCandidate(candidate);
+    if (!normalized || seen.has(normalized.gloss)) continue;
+    seen.add(normalized.gloss);
+    unique.push(normalized);
+    if (unique.length >= MAX_RECOGNITION_CANDIDATES) break;
+  }
+  return unique;
+}
+
+function normalizeRecognition(payload) {
+  const rawCandidates = Array.isArray(payload?.candidates) ? payload.candidates
+    : Array.isArray(payload?.alternatives) ? payload.alternatives
+    : Array.isArray(payload?.top_candidates) ? payload.top_candidates
+    : Array.isArray(payload?.top5) ? payload.top5
+    : [];
+  const primary = normalizeCandidate({
+    gloss: payload?.gloss || payload?.word || payload?.label,
+    confidence: payload?.confidence ?? payload?.score,
+    mean_confidence: payload?.mean_confidence,
+    temporal_confidence: payload?.temporal_confidence,
+  });
+  const candidates = uniqueCandidates([
+    ...(primary ? [primary] : []),
+    ...rawCandidates,
+  ]);
+  const selected = primary || candidates[0] || null;
+  return selected ? {
+    id: `rec-${Date.now()}-${recognitionIdSeq++}`,
+    value: selected.gloss,
+    original: selected.gloss,
+    confidence: selected.confidence,
+    candidates,
+    corrected: false,
+  } : null;
+}
+
+function clearRecognitionError() {
+  recognitionError.textContent = '';
+  recognitionError.classList.remove('visible');
+}
+
+function showRecognitionError(message) {
+  recognitionError.textContent = message;
+  recognitionError.classList.add('visible');
+}
+
+function showRecognitionNotice(message, actionLabel, action) {
+  recognitionNotice.textContent = '';
+  if (!message) {
+    recognitionNotice.classList.remove('visible');
+    return;
+  }
+
+  const span = document.createElement('span');
+  span.textContent = message;
+  recognitionNotice.appendChild(span);
+  if (actionLabel && typeof action === 'function') {
+    const button = document.createElement('button');
+    button.className = 'inline-action';
+    button.type = 'button';
+    button.textContent = actionLabel;
+    button.addEventListener('click', action);
+    recognitionNotice.appendChild(button);
+  }
+  recognitionNotice.classList.add('visible');
+}
+
+function activeGlossPhrase() {
+  return recognizedSigns.map(sign => sign.value).filter(Boolean).join(' ');
+}
+
+function renderRecognizedSigns() {
+  glossDisplay.textContent = '';
+  useGlossBtn.disabled = recognizedSigns.length === 0;
+
+  if (!recognizedSigns.length) {
+    const empty = document.createElement('div');
+    empty.className = 'recognition-empty';
+    empty.textContent = 'No recognized signs yet.';
+    glossDisplay.appendChild(empty);
+    closeCorrectionPanel();
+    return;
+  }
+
+  for (const sign of recognizedSigns) {
+    const chip = document.createElement('div');
+    chip.className = 'recognition-chip';
+    if (sign.corrected) chip.classList.add('is-corrected');
+    else if (sign.confidence != null && sign.confidence < 0.65) chip.classList.add('is-low');
+    chip.setAttribute('role', 'listitem');
+
+    const main = document.createElement('button');
+    main.type = 'button';
+    main.className = 'chip-main';
+    main.setAttribute('aria-label', `Correct ${sign.value}`);
+    main.addEventListener('click', () => openCorrectionPanel(sign.id));
+
+    const word = document.createElement('span');
+    word.className = 'chip-word';
+    word.textContent = sign.value;
+    main.appendChild(word);
+
+    const confidenceText = formatConfidence(sign.confidence);
+    if (confidenceText) {
+      const confidence = document.createElement('span');
+      confidence.className = 'chip-confidence';
+      confidence.textContent = confidenceText;
+      main.appendChild(confidence);
+    }
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'chip-remove';
+    remove.textContent = 'x';
+    remove.setAttribute('aria-label', `Remove ${sign.value}`);
+    remove.addEventListener('click', () => removeRecognizedSign(sign.id));
+
+    chip.appendChild(main);
+    chip.appendChild(remove);
+    glossDisplay.appendChild(chip);
+  }
+}
+
+function openCorrectionPanel(signId) {
+  if (glossTimer) { clearTimeout(glossTimer); glossTimer = null; }
+  const sign = recognizedSigns.find(item => item.id === signId);
+  if (!sign) return;
+
+  selectedSignId = sign.id;
+  pendingCandidate = { gloss: sign.value, confidence: sign.confidence };
+  correctionTitle.textContent = `Correction: ${sign.value}`;
+  correctionNote.textContent = sign.candidates.length > 1
+    ? 'Top matches from this detection.'
+    : 'No alternatives from recognizer.';
+  useCandidateBtn.disabled = true;
+  candidateList.textContent = '';
+
+  if (!sign.candidates.length) {
+    const empty = document.createElement('div');
+    empty.className = 'candidate-empty';
+    empty.textContent = 'No alternatives available for this sign.';
+    candidateList.appendChild(empty);
+  } else {
+    for (const candidate of sign.candidates.slice(0, MAX_RECOGNITION_CANDIDATES)) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'candidate-btn';
+      button.setAttribute('role', 'option');
+      button.setAttribute('aria-selected', candidate.gloss === sign.value ? 'true' : 'false');
+      if (candidate.gloss === sign.value) button.classList.add('selected');
+
+      const word = document.createElement('span');
+      word.className = 'candidate-word';
+      word.textContent = candidate.gloss;
+      button.appendChild(word);
+
+      const confidenceText = formatConfidence(candidate.confidence);
+      if (confidenceText) {
+        const confidence = document.createElement('span');
+        confidence.className = 'candidate-confidence';
+        confidence.textContent = confidenceText;
+        button.appendChild(confidence);
+      }
+
+      button.addEventListener('click', () => {
+        pendingCandidate = candidate;
+        for (const item of candidateList.querySelectorAll('.candidate-btn')) {
+          item.classList.remove('selected');
+          item.setAttribute('aria-selected', 'false');
+        }
+        button.classList.add('selected');
+        button.setAttribute('aria-selected', 'true');
+        useCandidateBtn.disabled = candidate.gloss === sign.value;
+      });
+      candidateList.appendChild(button);
+    }
+  }
+
+  correctionPanel.hidden = false;
+}
+
+function closeCorrectionPanel() {
+  selectedSignId = null;
+  pendingCandidate = null;
+  correctionPanel.hidden = true;
+}
+
+function confirmCandidateCorrection() {
+  if (!selectedSignId || !pendingCandidate) return;
+  const sign = recognizedSigns.find(item => item.id === selectedSignId);
+  if (!sign || pendingCandidate.gloss === sign.value) return;
+
+  sign.value = pendingCandidate.gloss;
+  sign.confidence = pendingCandidate.confidence;
+  sign.corrected = true;
+  closeCorrectionPanel();
+  renderRecognizedSigns();
+  showRecognitionNotice(`Using ${sign.value}.`, '', null);
+  scheduleGlossFlush();
+}
+
+function removeRecognizedSign(signId) {
+  const index = recognizedSigns.findIndex(sign => sign.id === signId);
+  if (index < 0) return;
+  const [removed] = recognizedSigns.splice(index, 1);
+  lastRemovedSign = { sign: removed, index };
+  if (selectedSignId === signId) closeCorrectionPanel();
+  renderRecognizedSigns();
+  showRecognitionNotice(`Removed ${removed.value}.`, 'Undo', undoRemoveRecognizedSign);
+  if (recognizedSigns.length) scheduleGlossFlush();
+  else if (glossTimer) { clearTimeout(glossTimer); glossTimer = null; }
+}
+
+function undoRemoveRecognizedSign() {
+  if (!lastRemovedSign) return;
+  const index = Math.min(lastRemovedSign.index, recognizedSigns.length);
+  recognizedSigns.splice(index, 0, lastRemovedSign.sign);
+  lastRemovedSign = null;
+  renderRecognizedSigns();
+  showRecognitionNotice('Restored.', '', null);
+  scheduleGlossFlush();
+}
+
+renderRecognizedSigns();
+
+window.DeepSignRecognitionDebug = {
+  addSample(payload) {
+    const recognition = normalizeRecognition(payload);
+    if (!recognition) {
+      showRecognitionError('Sample did not include a recognizable gloss.');
+      return false;
+    }
+    recognizedSigns.push(recognition);
+    clearRecognitionError();
+    renderRecognizedSigns();
+    return true;
+  },
+  reset() {
+    recognizedSigns = [];
+    lastRemovedSign = null;
+    clearRecognitionError();
+    showRecognitionNotice('', '', null);
+    renderRecognizedSigns();
+  },
+};
 
 // ── Camera lifecycle ──────────────────────────────────────────────────── //
 
@@ -1018,17 +2156,25 @@ async function flushSignBuffer() {
     const r = await fetch('/api/recognize', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ frames }),
+      body: JSON.stringify({ roomId, frames }),
     });
     if (!r.ok) throw new Error(r.statusText);
-    const { gloss, confidence } = await r.json();
-    if (gloss && confidence >= CONFIDENCE_MIN) {
-      signGlosses.push(gloss.toUpperCase());
-      glossDisplay.textContent = signGlosses.join('  ');
+    const payload = await r.json();
+    const recognition = normalizeRecognition(payload);
+    if (recognition && (recognition.confidence == null || recognition.confidence >= CONFIDENCE_MIN)) {
+      recognizedSigns.push(recognition);
+      clearRecognitionError();
+      showRecognitionNotice('', '', null);
+      renderRecognizedSigns();
       scheduleGlossFlush();
+    } else if (recognition) {
+      showRecognitionError(`Low-confidence match: ${recognition.value}. Try again or sign more clearly.`);
+    } else {
+      showRecognitionError('No recognizable sign detected.');
     }
   } catch (e) {
     console.error('[Recognize]', e);
+    showRecognitionError('Recognition is unavailable right now.');
   } finally {
     recognizing = false;
     setSignStatus('Watching… sign a word!');
@@ -1043,22 +2189,28 @@ function scheduleGlossFlush() {
 // ── Gloss → English → ElevenLabs TTS ─────────────────────────────────── //
 
 async function flushGlossesToEnglish() {
-  if (!signGlosses.length) return;
-  const gloss = signGlosses.splice(0).join(' ');
-  glossDisplay.textContent = '';
+  if (!recognizedSigns.length) return;
+  closeCorrectionPanel();
+  const gloss = activeGlossPhrase();
+  recognizedSigns = [];
+  lastRemovedSign = null;
+  renderRecognizedSigns();
+  showRecognitionNotice('', '', null);
   setSignStatus('Translating…');
   try {
     const geRes = await fetch('/api/gloss-to-english', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ gloss }),
+      body: JSON.stringify({ roomId, gloss }),
     });
+    if (!geRes.ok) throw new Error(geRes.statusText);
     const { text } = await geRes.json();
     englishOutput.textContent = text;
     setSignStatus('Speaking…');
     await speakText(text);
   } catch (e) {
     console.error('[Gloss→EN]', e);
+    englishOutput.textContent = 'Could not translate that gloss.';
   } finally {
     setSignStatus('Watching… sign a word!');
   }
@@ -1069,7 +2221,7 @@ async function speakText(text) {
     const r = await fetch('/api/tts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ roomId, text }),
     });
     if (!r.ok) { console.warn('[TTS] server error', r.status); return; }
     const blob = await r.blob();
@@ -1093,15 +2245,32 @@ cameraBtn.addEventListener('click', async () => {
   finally { cameraBtn.disabled = false; }
 });
 
+useGlossBtn.addEventListener('click', () => {
+  if (glossTimer) { clearTimeout(glossTimer); glossTimer = null; }
+  flushGlossesToEnglish();
+});
+
+closeCorrectionBtn.addEventListener('click', () => {
+  closeCorrectionPanel();
+  if (recognizedSigns.length) scheduleGlossFlush();
+});
+
+useCandidateBtn.addEventListener('click', confirmCandidateCorrection);
+
 signResetBtn.addEventListener('click', () => {
   if (glossTimer) { clearTimeout(glossTimer); glossTimer = null; }
-  signGlosses     = [];
+  recognizedSigns = [];
+  selectedSignId = null;
+  pendingCandidate = null;
+  lastRemovedSign = null;
   signFrameBuffer = [];
   signPreRollFrames = [];
   signActive      = false;
   signRestCount   = 0;
   prevWrists      = [];
-  glossDisplay.textContent  = '';
+  clearRecognitionError();
+  showRecognitionNotice('', '', null);
+  renderRecognizedSigns();
   englishOutput.textContent = '';
   setSignStatus(signRunning ? 'Watching… sign a word!' : 'Start camera to begin signing.');
 });

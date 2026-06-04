@@ -1,12 +1,16 @@
 import io
 import csv
+import json
+import math
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections import OrderedDict
-from threading import Lock
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from threading import Lock, Thread
 from typing import Optional
 
 import numpy as np
@@ -14,6 +18,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
+
+from lexicon_resolution import GlossResolver
 
 PORT = int(os.environ.get("PORT", "8000"))
 
@@ -35,6 +41,9 @@ TARGET_BODY_HEIGHT = float(os.environ.get("TARGET_BODY_HEIGHT", "210"))
 STABILIZE_BODY_SIZE = os.environ.get("STABILIZE_BODY_SIZE", "1").lower() not in ("0", "false", "no")
 AVATAR_Y_OFFSET = float(os.environ.get("AVATAR_Y_OFFSET", "-45"))
 POSE_CACHE_SIZE = max(0, int(os.environ.get("POSE_CACHE_SIZE", "128")))
+POSE_LOOKUP_CACHE_SIZE = max(1, int(os.environ.get("POSE_LOOKUP_CACHE_SIZE", "256")))
+POSE_BACKEND = os.environ.get("POSE_BACKEND", "library").strip().lower()
+POSE_LIBRARY_LOGS = os.environ.get("POSE_LIBRARY_LOGS", "0").lower() in ("1", "true", "yes")
 POSE_GENERATION_TIMEOUT = float(os.environ.get("POSE_GENERATION_TIMEOUT", "30"))
 RECOGNIZE_SEQUENCE_LENGTH = max(8, int(os.environ.get("RECOGNIZE_SEQUENCE_LENGTH", "24")))
 RECOGNIZE_TOP_K = max(1, int(os.environ.get("RECOGNIZE_TOP_K", "48")))
@@ -69,6 +78,37 @@ SIMPLE_FACE_COLOR = (255, 255, 255)
 
 _pose_cache: OrderedDict[str, bytes] = OrderedDict()
 _pose_cache_lock = Lock()
+_pose_lookup = None
+_pose_lookup_lock = Lock()
+
+
+def _configured_preload_texts() -> list[str]:
+    raw = os.environ.get(
+        "POSE_PRELOAD_TEXTS",
+        "hello,please help me,good morning nice meet you,thank you for help",
+    ).strip()
+    if raw.lower() in ("", "0", "false", "no", "none"):
+        return []
+    seen = set()
+    texts = []
+    for item in raw.split(","):
+        text = item.strip()
+        key = text.lower()
+        if text and key not in seen:
+            seen.add(key)
+            texts.append(text)
+    return texts
+
+
+POSE_PRELOAD_TEXTS = _configured_preload_texts()
+_preload_status = {
+    "configured": len(POSE_PRELOAD_TEXTS),
+    "completed": 0,
+    "failed": 0,
+    "running": False,
+    "finished": False,
+    "last_error": None,
+}
 
 # --- Sign recognition lexicon (loaded at startup) ---
 _lexicon_features: dict = {}   # gloss -> {"mean": np.ndarray, "sequence": np.ndarray}
@@ -127,6 +167,18 @@ def _lexicon_has_usable_entries(directory: str) -> bool:
 
 
 LEXICON_DIR = _resolve_lexicon_dir()
+LEXICON_ALIAS_FILE = os.environ.get("LEXICON_ALIAS_FILE") or os.path.join(LEXICON_DIR, "aliases.json")
+
+
+def _load_gloss_resolver() -> GlossResolver:
+    try:
+        return GlossResolver.from_paths(LEXICON_DIR, LEXICON_ALIAS_FILE)
+    except Exception as e:
+        print(f"[Startup] Ignoring unusable alias file {LEXICON_ALIAS_FILE}: {e}")
+        return GlossResolver.from_paths(LEXICON_DIR, None)
+
+
+GLOSS_RESOLVER = _load_gloss_resolver()
 
 
 def _resolve_cli() -> str:
@@ -182,6 +234,114 @@ def _cache_set(text: str, pose_bytes: bytes) -> None:
         _pose_cache.move_to_end(text)
         while len(_pose_cache) > POSE_CACHE_SIZE:
             _pose_cache.popitem(last=False)
+
+
+def _cache_snapshot() -> dict:
+    with _pose_cache_lock:
+        return {
+            "entries": len(_pose_cache),
+            "maxEntries": POSE_CACHE_SIZE,
+        }
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return round((time.perf_counter() - started_at) * 1000, 3)
+
+
+def _add_timing(timings: dict, key: str, started_at: float) -> None:
+    timings[key] = round(timings.get(key, 0.0) + _elapsed_ms(started_at), 3)
+
+
+@contextmanager
+def _pose_library_output():
+    if POSE_LIBRARY_LOGS:
+        yield
+        return
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        yield
+
+
+class _ThreadSafePoseLookupMixin:
+    def _init_threadsafe_cache(self, maxsize: int) -> None:
+        from spoken_to_signed.gloss_to_pose.lookup.lru_cache import LRUCache
+
+        self.cache = LRUCache(maxsize=maxsize)
+        self._cache_lock = Lock()
+        self.cache_hits = 0
+        self.cache_misses = 0
+
+    def get_pose(self, row):
+        from pose_format import Pose
+
+        pose_path = row["path"]
+        with self._cache_lock:
+            pose = self.cache.get(pose_path)
+            if pose is None:
+                pose = self.read_pose(pose_path)
+                self.cache.set(pose_path, pose)
+                self.cache_misses += 1
+            else:
+                self.cache_hits += 1
+
+        frame_time = 1000 / pose.body.fps
+        start_frame = math.floor(row["start"] // frame_time)
+        end_frame = math.ceil(row["end"] // frame_time) if row["end"] > 0 else -1
+        body = pose.body[start_frame:end_frame]
+        # pose-format slices are NumPy views; concatenate/trim mutates bodies.
+        # Copy here so a long-lived lookup cache never pollutes source poses.
+        body.data = np.array(body.data, copy=True)
+        body.confidence = np.array(body.confidence, copy=True)
+        return Pose(pose.header, body)
+
+    def cache_snapshot(self) -> dict:
+        with self._cache_lock:
+            return {
+                "entries": len(self.cache.cache),
+                "maxEntries": self.cache.maxsize,
+                "hits": self.cache_hits,
+                "misses": self.cache_misses,
+            }
+
+
+def _create_pose_lookup():
+    from spoken_to_signed.gloss_to_pose.lookup.csv_lookup import CSVPoseLookup
+    from spoken_to_signed.gloss_to_pose.lookup.fingerspelling_lookup import FingerspellingPoseLookup
+
+    class SafeFingerspellingPoseLookup(_ThreadSafePoseLookupMixin, FingerspellingPoseLookup):
+        def __init__(self):
+            super().__init__()
+            self._init_threadsafe_cache(POSE_LOOKUP_CACHE_SIZE)
+
+    class SafeCSVPoseLookup(_ThreadSafePoseLookupMixin, CSVPoseLookup):
+        def __init__(self, directory: str, backup=None):
+            super().__init__(directory=directory, backup=backup)
+            self._init_threadsafe_cache(POSE_LOOKUP_CACHE_SIZE)
+
+    return SafeCSVPoseLookup(LEXICON_DIR, backup=SafeFingerspellingPoseLookup())
+
+
+def _get_pose_lookup():
+    global _pose_lookup
+    if _pose_lookup is None:
+        with _pose_lookup_lock:
+            if _pose_lookup is None:
+                _pose_lookup = _create_pose_lookup()
+    return _pose_lookup
+
+
+def _pose_lookup_snapshot() -> dict:
+    lookup = _pose_lookup
+    if lookup is None:
+        return {
+            "entries": 0,
+            "maxEntries": POSE_LOOKUP_CACHE_SIZE,
+            "hits": 0,
+            "misses": 0,
+            "initialized": False,
+        }
+    snapshot = lookup.cache_snapshot()
+    snapshot["initialized"] = True
+    return snapshot
 
 # ---------------------------------------------------------------------------
 # Sign recognition helpers
@@ -423,30 +583,133 @@ def _load_lexicon_features() -> None:
     )
 
 
+def _resolve_pose_text(text: str) -> str:
+    resolved_text, resolutions = GLOSS_RESOLVER.resolve_text(text)
+    changed = resolved_text != text.strip().lower()
+    aliased = [item for item in resolutions if item.method in ("alias", "variant", "exact")]
+    if changed and aliased:
+        preview = ", ".join(f"{item.source}->{item.target}" for item in aliased[:6])
+        print(f"[Gloss] Resolved before fingerspelling: {preview}")
+    return resolved_text
+
+
 def generate_pose(text: str, retries: int = 2) -> bytes:
-    """Run the `text_to_gloss_to_pose` CLI and return the raw .pose bytes.
+    pose_bytes, _ = generate_pose_detailed(text, retries=retries)
+    return pose_bytes
 
-    Uses a unique temp file per call so concurrent requests don't collide.
 
-    `spoken-to-signed` reads pose files across a thread pool, and the
-    pose_format binary reader occasionally races on long, fingerspelling-heavy
-    utterances ("buffer is too small for requested array"). The failure is
-    transient — a retry reliably succeeds — so we retry a couple of times
-    before giving up.
+def generate_pose_detailed(text: str, retries: int = 2) -> tuple[bytes, dict]:
+    """Generate a .pose binary and return per-stage latency timings.
+
+    The default backend uses the spoken-to-signed Python API directly and keeps
+    the lexicon lookup cache warm across requests. `POSE_BACKEND=cli` keeps the
+    old subprocess path available as a rollback switch.
     """
-    cached = _cache_get(text)
-    if cached is not None:
-        return cached
+    timings = {
+        "backend": POSE_BACKEND if POSE_BACKEND == "cli" else "library",
+        "cache": "miss",
+    }
+    total_started = time.perf_counter()
 
+    started = time.perf_counter()
+    resolved_text = _resolve_pose_text(text)
+    _add_timing(timings, "alias_resolution", started)
+
+    started = time.perf_counter()
+    cached = _cache_get(resolved_text)
+    _add_timing(timings, "pose_cache_lookup", started)
+    if cached is not None:
+        timings["cache"] = "hit"
+        timings["bytes"] = len(cached)
+        timings["pose_total"] = _elapsed_ms(total_started)
+        return cached, timings
+
+    if POSE_BACKEND == "cli":
+        pose_bytes, cli_timings = _generate_pose_cli_processed(resolved_text, retries=retries)
+        timings.update(cli_timings)
+    else:
+        try:
+            pose_bytes, library_timings = _generate_pose_library_processed(resolved_text)
+            timings.update(library_timings)
+        except Exception as e:
+            print(f"[Pose] In-process backend failed ({str(e)[:100]}); falling back to CLI")
+            fallback_bytes, cli_timings = _generate_pose_cli_processed(resolved_text, retries=retries)
+            timings.update(cli_timings)
+            timings["backend"] = "cli_fallback"
+            pose_bytes = fallback_bytes
+
+    timings["bytes"] = len(pose_bytes)
+    timings["pose_total"] = _elapsed_ms(total_started)
+    _cache_set(resolved_text, pose_bytes)
+    return pose_bytes, timings
+
+
+def _generate_pose_library_processed(resolved_text: str) -> tuple[bytes, dict]:
+    timings: dict = {"backend": "library"}
+    started = time.perf_counter()
+    from spoken_to_signed.gloss_to_pose import PoseResult, concatenate_poses
+    from spoken_to_signed.text_to_gloss.simple import text_to_gloss
+    _add_timing(timings, "pose_library_import", started)
+
+    started = time.perf_counter()
+    lookup = _get_pose_lookup()
+    _add_timing(timings, "pose_lookup_init", started)
+
+    with _pose_library_output():
+        started = time.perf_counter()
+        sentences = text_to_gloss(text=resolved_text, language="en")
+        _add_timing(timings, "simple_gloss", started)
+
+        sentence_results = []
+        for sentence in sentences:
+            poses = []
+            for item in sentence:
+                if not item.word:
+                    continue
+                started = time.perf_counter()
+                try:
+                    poses.append(lookup.lookup(item.word, item.gloss, "en", "ase").pose)
+                except FileNotFoundError as e:
+                    print(e)
+                _add_timing(timings, "pose_loading", started)
+
+            if not poses:
+                gloss_sequence = " ".join([f"{item.word}/{item.gloss}" for item in sentence])
+                raise Exception(f"No poses found for {gloss_sequence}")
+
+            started = time.perf_counter()
+            sentence_results.append(PoseResult(pose=concatenate_poses(poses)))
+            _add_timing(timings, "motion_generation", started)
+
+        if len(sentence_results) == 1:
+            pose = sentence_results[0].pose
+        else:
+            started = time.perf_counter()
+            pose = concatenate_poses([result.pose for result in sentence_results], trim=False)
+            _add_timing(timings, "motion_generation", started)
+
+    pose, post_timings = _postprocess_pose_object(pose)
+    timings.update(post_timings)
+    started = time.perf_counter()
+    buf = io.BytesIO()
+    pose.write(buf)
+    _add_timing(timings, "pose_serialization", started)
+    return buf.getvalue(), timings
+
+
+def _generate_pose_cli_processed(resolved_text: str, retries: int = 2) -> tuple[bytes, dict]:
+    """Run the legacy CLI path and return processed bytes plus timings."""
+    timings: dict = {"backend": "cli"}
     last_err = None
     for attempt in range(retries + 1):
         fd, out_path = tempfile.mkstemp(suffix=".pose")
         os.close(fd)
         try:
+            started = time.perf_counter()
             result = subprocess.run(
                 [
                     CLI,
-                    "--text", text,
+                    "--text", resolved_text,
                     "--glosser", "simple",
                     "--spoken-language", "en",
                     "--signed-language", "ase",
@@ -457,12 +720,16 @@ def generate_pose(text: str, retries: int = 2) -> bytes:
                 text=True,
                 timeout=POSE_GENERATION_TIMEOUT,
             )
+            _add_timing(timings, "subprocess_generation", started)
             if result.returncode != 0:
                 raise RuntimeError(f"text_to_gloss_to_pose failed: {result.stderr}")
+            started = time.perf_counter()
             with open(out_path, "rb") as f:
-                pose_bytes = _postprocess_pose(f.read())
-            _cache_set(text, pose_bytes)
-            return pose_bytes
+                raw_bytes = f.read()
+            _add_timing(timings, "pose_file_read", started)
+            pose_bytes, post_timings = _postprocess_pose_bytes(raw_bytes)
+            timings.update(post_timings)
+            return pose_bytes, timings
         except Exception as e:
             last_err = e
             if attempt < retries:
@@ -476,30 +743,56 @@ def generate_pose(text: str, retries: int = 2) -> bytes:
 
 
 def _postprocess_pose(pose_bytes: bytes) -> bytes:
-    """Apply runtime cleanup passes to generated pose bytes."""
+    processed, _ = _postprocess_pose_bytes(pose_bytes)
+    return processed
+
+
+def _postprocess_pose_bytes(pose_bytes: bytes) -> tuple[bytes, dict]:
     try:
         from pose_format import Pose
 
+        started = time.perf_counter()
         pose = Pose.read(pose_bytes)
-        if STABILIZE_BODY_SIZE:
-            _stabilize_body_size(pose)
-        if STABILIZE_FACE_SIZE:
-            _stabilize_face_size(pose)
-        # Simplify after stabilization (which needs the dense mesh) but before the
-        # Y-shift, which operates on whatever components the pose currently has.
-        if SIMPLE_FACE:
-            pose = _simplify_face(pose)
-        if AVATAR_Y_OFFSET:
-            _shift_avatar_y(pose, AVATAR_Y_OFFSET)
-        if SIGN_SPEED != 1.0:
-            pose.body.fps = pose.body.fps * SIGN_SPEED
-
+        timings = {"pose_parse": _elapsed_ms(started)}
+        pose, post_timings = _postprocess_pose_object(pose)
+        timings.update(post_timings)
+        started = time.perf_counter()
         buf = io.BytesIO()
         pose.write(buf)
-        return buf.getvalue()
+        _add_timing(timings, "pose_serialization", started)
+        return buf.getvalue(), timings
     except Exception as e:
         print(f"[Pose] Postprocess skipped: {e}")
-        return pose_bytes
+        return pose_bytes, {"pose_processing": 0.0, "pose_serialization": 0.0}
+
+
+def _postprocess_pose_object(pose) -> tuple[object, dict]:
+    """Apply runtime cleanup passes to an in-memory pose."""
+    timings: dict = {}
+    processing_started = time.perf_counter()
+    if STABILIZE_BODY_SIZE:
+        started = time.perf_counter()
+        _stabilize_body_size(pose)
+        _add_timing(timings, "body_stabilization", started)
+    if STABILIZE_FACE_SIZE:
+        started = time.perf_counter()
+        _stabilize_face_size(pose)
+        _add_timing(timings, "face_stabilization", started)
+    # Simplify after stabilization (which needs the dense mesh) but before the
+    # Y-shift, which operates on whatever components the pose currently has.
+    if SIMPLE_FACE:
+        started = time.perf_counter()
+        pose = _simplify_face(pose)
+        _add_timing(timings, "face_simplification", started)
+    if AVATAR_Y_OFFSET:
+        started = time.perf_counter()
+        _shift_avatar_y(pose, AVATAR_Y_OFFSET)
+        _add_timing(timings, "avatar_shift", started)
+    if SIGN_SPEED != 1.0:
+        pose.body.fps = pose.body.fps * SIGN_SPEED
+
+    timings["pose_processing"] = _elapsed_ms(processing_started)
+    return pose, timings
 
 
 def _simplify_face(pose):
@@ -671,74 +964,140 @@ def _stabilize_face_size(pose) -> None:
 
     data = pose.body.data[:, :, face_slice, :]
     confidence = pose.body.confidence[:, :, face_slice]
-    visible = confidence > 0
     pose_data = pose.body.data[:, :, pose_slice, :] if pose_slice is not None else None
     pose_confidence = pose.body.confidence[:, :, pose_slice] if pose_slice is not None else None
 
-    for frame_index in range(data.shape[0]):
-        for person_index in range(data.shape[1]):
-            frame_visible = visible[frame_index, person_index]
-            if frame_visible.sum() < 20:
-                continue
+    visible = confidence > 0
+    xy_all = data[:, :, :, :2]
+    finite_xy = np.isfinite(xy_all).all(axis=3)
+    nonzero_xy = np.abs(xy_all).sum(axis=3) > 0
+    valid_visible = visible & finite_xy & nonzero_xy
+    confidence[visible & ~valid_visible] = 0
+    visible = valid_visible
 
-            points = data[frame_index, person_index]
-            frame_confidence = confidence[frame_index, person_index]
-            visible_indices = np.flatnonzero(frame_visible)
-            xy = points[visible_indices, :2]
-            valid = np.isfinite(xy).all(axis=1) & (np.abs(xy).sum(axis=1) > 0)
-            invalid_indices = visible_indices[~valid]
-            if len(invalid_indices):
-                frame_confidence[invalid_indices] = 0
-            visible_indices = visible_indices[valid]
-            xy = xy[valid]
-            if len(xy) < 20:
-                continue
+    eligible = visible.sum(axis=2) >= 20
+    if not eligible.any():
+        return
 
-            min_xy = np.percentile(xy, 2, axis=0)
-            max_xy = np.percentile(xy, 98, axis=0)
-            face_width = float(max_xy[0] - min_xy[0])
-            face_height = float(max_xy[1] - min_xy[1])
-            if face_width <= 1 or face_height <= 1:
-                continue
+    block = data[eligible].copy()
+    visible_block = visible[eligible]
+    masked_xy = np.where(visible_block[:, :, None], block[:, :, :2], np.nan)
 
-            scale_x = TARGET_FACE_WIDTH / face_width if TARGET_FACE_WIDTH > 0 else 1.0
-            scale_y = TARGET_FACE_HEIGHT / face_height if TARGET_FACE_HEIGHT > 0 else 1.0
-            if not np.isfinite(scale_x) or not np.isfinite(scale_y):
-                continue
-            # Keep outlier detections from causing dramatic warps.
-            scale_x = float(np.clip(scale_x, 0.65, 1.45))
-            scale_y = float(np.clip(scale_y, 0.65, 1.45))
+    with np.errstate(all="ignore"):
+        min_xy = np.nanpercentile(masked_xy, 2, axis=1)
+        max_xy = np.nanpercentile(masked_xy, 98, axis=1)
+    face_size = max_xy - min_xy
+    face_width = face_size[:, 0]
+    face_height = face_size[:, 1]
+    valid_face = (
+        np.isfinite(face_width)
+        & np.isfinite(face_height)
+        & (face_width > 1)
+        & (face_height > 1)
+    )
+    if not valid_face.any():
+        return
 
-            center = (min_xy + max_xy) / 2
-            points[visible_indices, 0] = (points[visible_indices, 0] - center[0]) * scale_x + center[0]
-            points[visible_indices, 1] = (points[visible_indices, 1] - center[1]) * scale_y + center[1]
-            points[visible_indices, 2] = points[visible_indices, 2] * ((scale_x + scale_y) / 2)
+    valid_block = block[valid_face].copy()
+    valid_mask = visible_block[valid_face]
+    centers = ((min_xy[valid_face] + max_xy[valid_face]) / 2).astype(np.float32)
 
-            if (
-                pose_data is None
-                or pose_confidence is None
-                or left_shoulder_index is None
-                or right_shoulder_index is None
-                or pose_confidence[frame_index, person_index, left_shoulder_index] <= 0
-                or pose_confidence[frame_index, person_index, right_shoulder_index] <= 0
-            ):
-                continue
+    scale_x = np.ones(len(valid_block), dtype=np.float32)
+    scale_y = np.ones(len(valid_block), dtype=np.float32)
+    if TARGET_FACE_WIDTH > 0:
+        scale_x = np.clip(TARGET_FACE_WIDTH / face_width[valid_face], 0.65, 1.45).astype(np.float32)
+    if TARGET_FACE_HEIGHT > 0:
+        scale_y = np.clip(TARGET_FACE_HEIGHT / face_height[valid_face], 0.65, 1.45).astype(np.float32)
+    finite_scale = np.isfinite(scale_x) & np.isfinite(scale_y)
+    if not finite_scale.any():
+        return
 
-            left_shoulder = pose_data[frame_index, person_index, left_shoulder_index, :2]
-            right_shoulder = pose_data[frame_index, person_index, right_shoulder_index, :2]
-            if not np.isfinite(left_shoulder).all() or not np.isfinite(right_shoulder).all():
-                continue
+    valid_block = valid_block[finite_scale].copy()
+    valid_mask = valid_mask[finite_scale]
+    centers = centers[finite_scale]
+    scale_x = scale_x[finite_scale]
+    scale_y = scale_y[finite_scale]
 
-            shoulder_center = (left_shoulder + right_shoulder) / 2
-            target_center = shoulder_center + np.array([TARGET_FACE_SHOULDER_X, TARGET_FACE_SHOULDER_Y])
-            adjusted_xy = points[visible_indices, :2]
-            adjusted_xy = adjusted_xy[np.isfinite(adjusted_xy).all(axis=1)]
-            if len(adjusted_xy) < 20:
-                continue
-            adjusted_min_xy = np.percentile(adjusted_xy, 2, axis=0)
-            adjusted_max_xy = np.percentile(adjusted_xy, 98, axis=0)
-            adjusted_center = (adjusted_min_xy + adjusted_max_xy) / 2
-            points[visible_indices, :2] = points[visible_indices, :2] + (target_center - adjusted_center)
+    valid_block[:, :, 0] = np.where(
+        valid_mask,
+        (valid_block[:, :, 0] - centers[:, None, 0]) * scale_x[:, None] + centers[:, None, 0],
+        valid_block[:, :, 0],
+    )
+    valid_block[:, :, 1] = np.where(
+        valid_mask,
+        (valid_block[:, :, 1] - centers[:, None, 1]) * scale_y[:, None] + centers[:, None, 1],
+        valid_block[:, :, 1],
+    )
+    valid_block[:, :, 2] = np.where(
+        valid_mask,
+        valid_block[:, :, 2] * ((scale_x + scale_y) / 2)[:, None],
+        valid_block[:, :, 2],
+    )
+
+    eligible_coords = np.column_stack(np.nonzero(eligible))
+    valid_coords = eligible_coords[valid_face][finite_scale]
+
+    if (
+        pose_data is not None
+        and pose_confidence is not None
+        and left_shoulder_index is not None
+        and right_shoulder_index is not None
+    ):
+        frame_indices = valid_coords[:, 0]
+        person_indices = valid_coords[:, 1]
+        left_conf = pose_confidence[frame_indices, person_indices, left_shoulder_index]
+        right_conf = pose_confidence[frame_indices, person_indices, right_shoulder_index]
+        left_shoulder = pose_data[frame_indices, person_indices, left_shoulder_index, :2]
+        right_shoulder = pose_data[frame_indices, person_indices, right_shoulder_index, :2]
+        shoulder_valid = (
+            (left_conf > 0)
+            & (right_conf > 0)
+            & np.isfinite(left_shoulder).all(axis=1)
+            & np.isfinite(right_shoulder).all(axis=1)
+        )
+        if shoulder_valid.any():
+            shoulder_center = (left_shoulder[shoulder_valid] + right_shoulder[shoulder_valid]) / 2
+            target_center = shoulder_center + np.array(
+                [TARGET_FACE_SHOULDER_X, TARGET_FACE_SHOULDER_Y],
+                dtype=np.float32,
+            )
+            shift = target_center - centers[shoulder_valid]
+            valid_block[shoulder_valid, :, :2] = np.where(
+                valid_mask[shoulder_valid, :, None],
+                valid_block[shoulder_valid, :, :2] + shift[:, None, :],
+                valid_block[shoulder_valid, :, :2],
+            )
+
+    valid_indices = np.flatnonzero(valid_face)[finite_scale]
+    block[valid_indices] = valid_block
+    data[eligible] = block
+
+
+def _preload_pose_cache() -> None:
+    _preload_status["running"] = True
+    _preload_status["finished"] = False
+    for text in POSE_PRELOAD_TEXTS:
+        try:
+            generate_pose(text)
+            _preload_status["completed"] += 1
+        except Exception as e:
+            _preload_status["failed"] += 1
+            _preload_status["last_error"] = str(e)[:160]
+            print(f"[Preload] Failed to cache {text!r}: {e}")
+    _preload_status["running"] = False
+    _preload_status["finished"] = True
+    if POSE_PRELOAD_TEXTS:
+        print(
+            f"[Preload] Cached {_preload_status['completed']}/{len(POSE_PRELOAD_TEXTS)} "
+            f"configured phrase(s)"
+        )
+
+
+def _start_pose_preload() -> None:
+    if not POSE_PRELOAD_TEXTS:
+        _preload_status["finished"] = True
+        return
+    Thread(target=_preload_pose_cache, daemon=True).start()
 
 
 @app.on_event("startup")
@@ -746,18 +1105,38 @@ async def startup():
     print(f"[Startup] ASL Pose Server listening on port {PORT}")
     print(f"[Startup] text_to_gloss_to_pose CLI: {CLI}")
     print(f"[Startup] Lexicon dir: {LEXICON_DIR}")
+    print(f"[Startup] Pose backend: {POSE_BACKEND} (lookup cache={POSE_LOOKUP_CACHE_SIZE})")
+    print(
+        f"[Startup] Gloss resolver: {len(GLOSS_RESOLVER.lexicon_glosses)} gloss(es), "
+        f"{len(GLOSS_RESOLVER.aliases)} alias(es) from {LEXICON_ALIAS_FILE}"
+    )
     try:
-        generate_pose("hello")
-        print("[Warmup] Pose model ready")
+        _, timings = generate_pose_detailed("hello")
+        print(f"[Warmup] Pose model ready ({timings.get('pose_total', 0):.1f}ms)")
     except Exception as e:
         print(f"[Warmup] Warning: {e}")
     # Load lexicon features for sign recognition (runs in the startup thread).
     _load_lexicon_features()
+    _start_pose_preload()
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "pose": {
+            "backend": POSE_BACKEND if POSE_BACKEND == "cli" else "library",
+            "signSpeed": SIGN_SPEED,
+            "responseCache": _cache_snapshot(),
+            "lookupCache": _pose_lookup_snapshot(),
+            "preload": dict(_preload_status),
+        },
+        "lexicon": {
+            "dir": LEXICON_DIR,
+            "glosses": len(GLOSS_RESOLVER.lexicon_glosses),
+            "aliases": len(GLOSS_RESOLVER.aliases),
+        },
+    }
 
 
 @app.post("/recognize")
@@ -793,12 +1172,7 @@ def recognize_sign(req: RecognizeRequest):
         return {"gloss": "", "confidence": 0.0}
 
     candidates.sort(key=lambda item: item[0], reverse=True)
-    best = {
-        "gloss": "",
-        "score": -1.0,
-        "mean_score": -1.0,
-        "temporal_score": -1.0,
-    }
+    reranked = []
 
     for mean_score, gloss, ref in candidates[:RECOGNIZE_TOP_K]:
         temporal_score = _temporal_similarity(query_sequence, ref["sequence"])
@@ -806,19 +1180,27 @@ def recognize_sign(req: RecognizeRequest):
             (1.0 - RECOGNIZE_TEMPORAL_WEIGHT) * mean_score
             + RECOGNIZE_TEMPORAL_WEIGHT * temporal_score
         )
-        if combined_score > best["score"]:
-            best = {
-                "gloss": gloss,
-                "score": combined_score,
-                "mean_score": mean_score,
-                "temporal_score": temporal_score,
-            }
+        reranked.append({
+            "gloss": gloss,
+            "confidence": round(float(combined_score), 4),
+            "mean_confidence": round(float(mean_score), 4),
+            "temporal_confidence": round(float(temporal_score), 4),
+        })
+
+    reranked.sort(key=lambda item: item["confidence"], reverse=True)
+    best = reranked[0] if reranked else {
+        "gloss": "",
+        "confidence": 0.0,
+        "mean_confidence": 0.0,
+        "temporal_confidence": 0.0,
+    }
 
     return {
         "gloss": best["gloss"],
-        "confidence": round(float(best["score"]), 4),
-        "mean_confidence": round(float(best["mean_score"]), 4),
-        "temporal_confidence": round(float(best["temporal_score"]), 4),
+        "confidence": best["confidence"],
+        "mean_confidence": best["mean_confidence"],
+        "temporal_confidence": best["temporal_confidence"],
+        "candidates": reranked[:5],
         "candidates_considered": min(RECOGNIZE_TOP_K, len(candidates)),
     }
 
@@ -829,8 +1211,16 @@ def pose(req: PoseRequest):
     if not text:
         raise HTTPException(status_code=400, detail="text must be non-empty")
     try:
-        pose_bytes = generate_pose(text)
+        pose_bytes, timings = generate_pose_detailed(text)
     except Exception as e:
         print(f"[Pose] Error generating pose: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    return Response(content=pose_bytes, media_type="application/octet-stream")
+    return Response(
+        content=pose_bytes,
+        media_type="application/octet-stream",
+        headers={
+            "X-DeepSign-Pose-Cache": str(timings.get("cache", "unknown")),
+            "X-DeepSign-Pose-Backend": str(timings.get("backend", "unknown")),
+            "X-DeepSign-Pose-Timings": json.dumps(timings, separators=(",", ":")),
+        },
+    )

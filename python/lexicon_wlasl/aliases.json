@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "aliases": {
+    "bye": "goodbye",
+    "bye bye": "goodbye",
+    "colour": "color",
+    "dad": "father",
+    "daddy": "father",
+    "grandmother": "grandma",
+    "grandpa": "grandfather",
+    "grey": "gray",
+    "hi": "hello",
+    "mom": "mother",
+    "mommy": "mother",
+    "mum": "mother",
+    "okay": "ok",
+    "phone call": "phone",
+    "thank you": "thankful",
+    "thanks": "thankful",
+    "tv": "television"
+  }
+}
