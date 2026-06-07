@@ -1126,6 +1126,17 @@ app.get('/icon.png', (req, res) => {
 
 // Sign->Speak REST endpoints.
 
+app.get('/api/recognize/debug', async (_req, res) => {
+  try {
+    const r = await fetch(`${POSE_SERVER_URL}/recognize/debug`);
+    if (!r.ok) return res.status(r.status).json({ error: 'Recognition debug unavailable' });
+    res.json(await r.json());
+  } catch (err) {
+    console.error('[RecognizeDebug]', err.name || 'error');
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Proxy landmark frames to the Python recognizer
 app.post('/api/recognize', async (req, res) => {
   const room = roomForMetrics(req.body?.roomId || req.query?.room);

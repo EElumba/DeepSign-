@@ -1681,7 +1681,7 @@ const MAX_SIGN_FRAMES    = 120;   // force-flush after ~4 s at 30 fps
 const REST_FRAMES        = 20;    // still frames before treating sign as complete
 const SIGN_PREROLL_FRAMES = 6;    // include setup handshape before movement starts
 const VELOCITY_THRESHOLD = 0.012; // normalized wrist movement to count as "active"
-const CONFIDENCE_MIN     = 0.45;  // recognition confidence gate
+const CONFIDENCE_MIN     = 0.62;  // fallback gate for recognizers without accepted/reason fields
 const GLOSS_IDLE_MS      = 2500;  // silence after last gloss → translate + speak
 const MAX_RECOGNITION_CANDIDATES = 5;
 
@@ -1700,6 +1700,7 @@ let recognitionIdSeq = 0;
 let selectedSignId = null;
 let pendingCandidate = null;
 let lastRemovedSign = null;
+let lastRecognitionPayload = null;
 
 function setSignStatus(msg) { signStatus.textContent = msg; }
 
@@ -1783,6 +1784,34 @@ function normalizeRecognition(payload) {
     candidates,
     corrected: false,
   } : null;
+}
+
+function recognitionRejectionMessage(payload) {
+  const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+  const topCandidate = normalizeCandidate(candidates[0]);
+  const topGloss = formatGloss(payload?.recognized_gloss || topCandidate?.gloss || '');
+  const confidence = formatConfidence(payload?.confidence ?? topCandidate?.confidence);
+  const reason = String(payload?.reason || payload?.debug?.reason || '');
+
+  if (reason.startsWith('insufficient_hand_visibility')) {
+    return 'I need a clearer view of your hand for a few more frames.';
+  }
+  if (reason.startsWith('insufficient_motion') || reason.startsWith('rigid_slide_rejected')) {
+    return 'Not confident yet. Please sign the full motion again.';
+  }
+  if (reason.startsWith('ambiguous_match')) {
+    return topGloss
+      ? `Not confident yet. Top match was ${topGloss}${confidence ? ` (${confidence})` : ''}, but it was too close to another sign.`
+      : 'Not confident yet. Please sign that again a little more clearly.';
+  }
+  if (reason.startsWith('low_confidence')) {
+    return topGloss
+      ? `Not confident yet. Top match was ${topGloss}${confidence ? ` (${confidence})` : ''}.`
+      : 'Not confident yet. Please sign that again.';
+  }
+  return topGloss
+    ? `Not confident yet. Top match was ${topGloss}${confidence ? ` (${confidence})` : ''}.`
+    : 'No recognizable sign detected.';
 }
 
 function clearRecognitionError() {
@@ -1993,6 +2022,13 @@ window.DeepSignRecognitionDebug = {
     showRecognitionNotice('', '', null);
     renderRecognizedSigns();
   },
+  lastResult() {
+    return lastRecognitionPayload;
+  },
+  async server() {
+    const response = await fetch('/api/recognize/debug');
+    return response.json();
+  },
 };
 
 // ── Camera lifecycle ──────────────────────────────────────────────────── //
@@ -2160,6 +2196,12 @@ async function flushSignBuffer() {
     });
     if (!r.ok) throw new Error(r.statusText);
     const payload = await r.json();
+    lastRecognitionPayload = payload;
+    console.debug('[Recognize]', payload);
+    if (payload?.accepted === false) {
+      showRecognitionError(recognitionRejectionMessage(payload));
+      return;
+    }
     const recognition = normalizeRecognition(payload);
     if (recognition && (recognition.confidence == null || recognition.confidence >= CONFIDENCE_MIN)) {
       recognizedSigns.push(recognition);
