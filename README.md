@@ -125,9 +125,30 @@ camera permissions.
 
 The Sign to Speak panel shows recognized glosses as editable chips. Each chip
 can display confidence, be removed with undo, or be opened to choose a better
-candidate. Corrections are session-local in the browser by default: the app does
-not persist correction data and does not store raw video. If correction logging
-is added later, keep it opt-in only.
+candidate. Unsure or rejected recognizer windows now open the same correction
+panel with the top candidates so a tester can choose the intended gloss or mark
+**None of these**. Raw video and raw landmark frames are not stored.
+
+Recognition metadata is logged locally by default to
+`data/recognition-events.jsonl` for threshold tuning. Set
+`RECOGNITION_LOG_ENABLED=0` to disable it, or set `RECOGNITION_LOG_PATH` to write
+somewhere else. Logged events include timestamps, room ID, optional target gloss,
+top candidates, confidence scores, margin, rejection reason, correction choice,
+smoothing state, and whether a phrase was spoken.
+
+Temporal smoothing is enabled in the browser. By default, a recognized gloss
+must appear in 2 of the last 3 recognition windows before it is added to the
+phrase and can be spoken. Configure this from the Node app with:
+
+```bash
+RECOGNITION_SMOOTHING_REQUIRED_AGREEMENT=2
+RECOGNITION_SMOOTHING_WINDOW_SIZE=3
+RECOGNITION_SMOOTHING_MAX_AGE_MS=7000
+RECOGNITION_FALLBACK_CONFIDENCE_MIN=0.62
+```
+
+Recognizer-side thresholds remain configurable on the Python server with the
+`RECOGNIZE_*` environment variables exposed by `/recognize/debug`.
 
 Expected `/recognize` response shape for top-5 candidates:
 
@@ -167,6 +188,30 @@ DeepSignRecognitionDebug.addSample({
 
 Click the chip to pick an alternative, click "Use this instead" to confirm it,
 or remove the chip and use Undo.
+
+### Webcam validation workflow
+
+1. Start the Python pose server and Node app.
+2. Open `/speak?room=<room-id>` and switch to **Sign to Speak**.
+3. Enter the expected gloss in **Target gloss** and press **Set**.
+4. Start the camera, sign the target gloss several times, and use the correction
+   panel when the app is unsure or wrong.
+5. Press **Export** to print recent recognition events and the calibration report
+   in the browser console.
+
+Debug/export endpoints:
+
+```bash
+curl http://127.0.0.1:3000/api/recognition/config
+curl http://127.0.0.1:3000/api/recognition/logs?limit=50
+curl http://127.0.0.1:3000/api/recognition/logs?format=jsonl
+curl http://127.0.0.1:3000/api/recognition/calibration?limit=1000
+curl http://127.0.0.1:3000/api/recognize/debug
+```
+
+The calibration report summarizes accepted/rejected attempts, corrections,
+spoken phrases, confidence buckets, accepted attempts later corrected, and
+rejected attempts recovered via candidate selection.
 
 If you already have both services running, reuse them instead of letting the
 script start new processes:

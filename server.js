@@ -4,6 +4,7 @@ import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { appendFile, mkdir, readFile, stat } from 'fs/promises';
 import { randomUUID } from 'crypto';
 import fetch from 'node-fetch';
 import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
@@ -32,6 +33,16 @@ const ROOM_ID_PATTERN = /^[a-zA-Z0-9_-]{6,80}$/;
 const PAIRING_TOKEN_PATTERN = /^[a-zA-Z0-9_-]{16,128}$/;
 const DEMO_POSE_ENABLED = process.env.DEMO_POSE_ENABLED !== '0';
 const ALLOW_CUSTOM_DEMO_POSE = process.env.ALLOW_CUSTOM_DEMO_POSE === '1';
+const RECOGNITION_LOG_ENABLED = process.env.RECOGNITION_LOG_ENABLED !== '0';
+const RECOGNITION_LOG_PATH = process.env.RECOGNITION_LOG_PATH || join(__dirname, 'data', 'recognition-events.jsonl');
+const RECOGNITION_LOG_EXPORT_LIMIT = Math.max(1, Number(process.env.RECOGNITION_LOG_EXPORT_LIMIT || 1000));
+const RECOGNITION_CLIENT_CONFIG = Object.freeze({
+  fallbackConfidenceMin: Number(process.env.RECOGNITION_FALLBACK_CONFIDENCE_MIN || 0.62),
+  smoothingWindowSize: Math.max(1, Number(process.env.RECOGNITION_SMOOTHING_WINDOW_SIZE || 3)),
+  smoothingRequiredAgreement: Math.max(1, Number(process.env.RECOGNITION_SMOOTHING_REQUIRED_AGREEMENT || 2)),
+  smoothingMaxAgeMs: Math.max(500, Number(process.env.RECOGNITION_SMOOTHING_MAX_AGE_MS || 7000)),
+  autoOpenCorrection: process.env.RECOGNITION_AUTO_OPEN_CORRECTION !== '0',
+});
 const METRIC_STAGES = Object.freeze([
   'speech_transcription',
   'transcript_chunk',
@@ -262,6 +273,168 @@ function normalizeMetricToken(value, fallback = 'unknown') {
     .replace(/[^a-z0-9_:/.-]+/g, '_')
     .replace(/^_+|_+$/g, '');
   return (token || fallback).slice(0, 80);
+}
+
+function safeNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function sanitizeRecognitionCandidate(candidate) {
+  if (!candidate || typeof candidate !== 'object') return null;
+  const gloss = String(
+    candidate.gloss
+    || candidate.word
+    || candidate.label
+    || candidate.text
+    || candidate.value
+    || ''
+  ).trim().toLowerCase();
+  if (!gloss) return null;
+  return {
+    gloss,
+    confidence: safeNumber(candidate.confidence ?? candidate.score ?? candidate.probability ?? candidate.prob),
+    meanConfidence: safeNumber(candidate.mean_confidence ?? candidate.meanConfidence),
+    temporalConfidence: safeNumber(candidate.temporal_confidence ?? candidate.temporalConfidence),
+  };
+}
+
+function sanitizeRecognitionCandidates(candidates, limit = 5) {
+  if (!Array.isArray(candidates)) return [];
+  const seen = new Set();
+  const cleaned = [];
+  for (const candidate of candidates) {
+    const normalized = sanitizeRecognitionCandidate(candidate);
+    if (!normalized || seen.has(normalized.gloss)) continue;
+    seen.add(normalized.gloss);
+    cleaned.push(normalized);
+    if (cleaned.length >= limit) break;
+  }
+  return cleaned;
+}
+
+function sanitizeRecognitionEvent(input = {}) {
+  const event = input.event && typeof input.event === 'object' ? input.event : input;
+  const debug = event.debug && typeof event.debug === 'object' ? event.debug : {};
+  return {
+    timestamp: event.timestamp || metricTimestamp(),
+    type: normalizeMetricToken(event.type || event.eventType || 'recognition_event'),
+    roomId: normalizeRoomId(event.roomId) || null,
+    attemptId: String(event.attemptId || '').slice(0, 96) || null,
+    targetGloss: String(event.targetGloss || '').trim().toLowerCase() || null,
+    predictedGloss: String(event.predictedGloss || event.gloss || event.recognized_gloss || '').trim().toLowerCase() || null,
+    accepted: typeof event.accepted === 'boolean' ? event.accepted : null,
+    spoken: typeof event.spoken === 'boolean' ? event.spoken : false,
+    confidence: safeNumber(event.confidence),
+    meanConfidence: safeNumber(event.meanConfidence ?? event.mean_confidence),
+    temporalConfidence: safeNumber(event.temporalConfidence ?? event.temporal_confidence),
+    margin: safeNumber(event.margin ?? event.topMargin ?? debug.top_margin),
+    reason: String(event.reason || debug.reason || '').slice(0, 240) || null,
+    selectedCorrection: String(event.selectedCorrection || '').trim().toLowerCase() || null,
+    correctionType: String(event.correctionType || '').trim().toLowerCase() || null,
+    noneOfThese: Boolean(event.noneOfThese),
+    smoothing: event.smoothing && typeof event.smoothing === 'object'
+      ? {
+          candidateGloss: String(event.smoothing.candidateGloss || '').trim().toLowerCase() || null,
+          agreement: safeNumber(event.smoothing.agreement),
+          requiredAgreement: safeNumber(event.smoothing.requiredAgreement),
+          windowSize: safeNumber(event.smoothing.windowSize),
+          committed: Boolean(event.smoothing.committed),
+        }
+      : null,
+    phrase: String(event.phrase || '').trim().slice(0, 240) || null,
+    candidates: sanitizeRecognitionCandidates(event.candidates || event.topCandidates || debug.top_candidates, 5),
+    debug: {
+      framesReceived: safeNumber(debug.frames_received ?? event.framesReceived),
+      visibleFrames: safeNumber(debug.visible_frames ?? event.visibleFrames),
+      visibilityRatio: safeNumber(debug.visibility_ratio ?? event.visibilityRatio),
+      motionPath: safeNumber(debug.motion_path ?? event.motionPath),
+      motionEfficiency: safeNumber(debug.motion_efficiency ?? event.motionEfficiency),
+      handshapeDelta: safeNumber(debug.handshape_delta ?? event.handshapeDelta),
+      classesLoaded: safeNumber(debug.classes_loaded ?? event.classesLoaded),
+      indexPath: String(debug.index_path || event.indexPath || '').slice(0, 500) || null,
+    },
+  };
+}
+
+async function appendRecognitionLog(event) {
+  if (!RECOGNITION_LOG_ENABLED) return false;
+  const sanitized = sanitizeRecognitionEvent(event);
+  await mkdir(dirname(RECOGNITION_LOG_PATH), { recursive: true });
+  await appendFile(RECOGNITION_LOG_PATH, `${JSON.stringify(sanitized)}\n`, 'utf8');
+  return true;
+}
+
+async function readRecognitionLogEvents(limit = RECOGNITION_LOG_EXPORT_LIMIT) {
+  try {
+    const contents = await readFile(RECOGNITION_LOG_PATH, 'utf8');
+    const lines = contents.split(/\r?\n/).filter(Boolean);
+    return lines.slice(-Math.max(1, limit)).map((line) => JSON.parse(line));
+  } catch (err) {
+    if (err.code === 'ENOENT') return [];
+    throw err;
+  }
+}
+
+function recognitionCalibrationReport(events) {
+  const attempts = events.filter((event) => event.type === 'recognition_attempt');
+  const corrections = events.filter((event) => event.type === 'recognition_correction');
+  const spoken = events.filter((event) => event.type === 'recognition_spoken');
+  const correctionByAttempt = new Map(corrections.map((event) => [event.attemptId, event]));
+  const buckets = new Map();
+
+  for (const attempt of attempts) {
+    const confidence = safeNumber(attempt.confidence) ?? 0;
+    const low = Math.floor(confidence * 10) / 10;
+    const bucket = `${low.toFixed(1)}-${(low + 0.1).toFixed(1)}`;
+    const entry = buckets.get(bucket) || { attempts: 0, corrected: 0, noneOfThese: 0, topMatchedCorrection: 0 };
+    const correction = correctionByAttempt.get(attempt.attemptId);
+    entry.attempts += 1;
+    if (correction) {
+      entry.corrected += 1;
+      if (correction.noneOfThese) entry.noneOfThese += 1;
+      if (correction.selectedCorrection && correction.selectedCorrection === attempt.predictedGloss) {
+        entry.topMatchedCorrection += 1;
+      }
+    }
+    buckets.set(bucket, entry);
+  }
+
+  const acceptedAttempts = attempts.filter((event) => event.accepted === true);
+  const rejectedAttempts = attempts.filter((event) => event.accepted === false);
+  const correctedAccepted = acceptedAttempts.filter((event) => {
+    const correction = correctionByAttempt.get(event.attemptId);
+    return correction && correction.selectedCorrection && correction.selectedCorrection !== event.predictedGloss;
+  });
+  const recoveredRejected = rejectedAttempts.filter((event) => {
+    const correction = correctionByAttempt.get(event.attemptId);
+    return correction && correction.selectedCorrection;
+  });
+
+  return {
+    generatedAt: metricTimestamp(),
+    logPath: RECOGNITION_LOG_PATH,
+    events: events.length,
+    attempts: attempts.length,
+    accepted: acceptedAttempts.length,
+    rejected: rejectedAttempts.length,
+    corrections: corrections.length,
+    spoken: spoken.length,
+    correctedAccepted: correctedAccepted.length,
+    recoveredRejected: recoveredRejected.length,
+    confidenceBuckets: Object.fromEntries([...buckets.entries()].sort()),
+    suggestions: {
+      confidence: correctedAccepted.length
+        ? 'Some accepted attempts were corrected; consider raising confidence or margin thresholds.'
+        : 'No corrected accepted attempts in the exported sample.',
+      rejection: recoveredRejected.length
+        ? 'Some rejected attempts were recoverable via candidates; inspect rejection reasons before raising thresholds further.'
+        : 'No rejected attempts were corrected to a candidate in the exported sample.',
+      data: attempts.length < 20
+        ? 'Collect at least 20-30 webcam attempts across several glosses before tuning thresholds.'
+        : 'Enough attempts exist for a first threshold review.',
+    },
+  };
 }
 
 function sanitizeMetricRoute(value) {
@@ -963,8 +1136,9 @@ app.get('/api/health', async (req, res) => {
     privacy: {
       rawAudioStored: false,
       rawVideoStored: false,
-      correctionDataStoredByDefault: false,
-      correctionLoggingOptInOnly: true,
+      rawLandmarkFramesStored: false,
+      correctionDataStoredByDefault: RECOGNITION_LOG_ENABLED,
+      correctionLoggingOptInOnly: false,
       fullConversationsStoredByDefault: false,
       storedFields: [
         'technical timing',
@@ -972,6 +1146,9 @@ app.get('/api/health', async (req, res) => {
         'route',
         'room id/session id',
         'error category',
+        'recognition candidates/confidence',
+        'recognition correction selections',
+        'spoken recognition gloss metadata',
       ],
     },
   });
@@ -1126,6 +1303,71 @@ app.get('/icon.png', (req, res) => {
 
 // Sign->Speak REST endpoints.
 
+app.get('/api/recognition/config', (_req, res) => {
+  res.json({
+    logging: {
+      enabled: RECOGNITION_LOG_ENABLED,
+      path: RECOGNITION_LOG_PATH,
+      exportLimit: RECOGNITION_LOG_EXPORT_LIMIT,
+    },
+    client: RECOGNITION_CLIENT_CONFIG,
+  });
+});
+
+app.post('/api/recognition/log', async (req, res) => {
+  try {
+    const written = await appendRecognitionLog(req.body || {});
+    res.json({ ok: true, written, path: RECOGNITION_LOG_PATH });
+  } catch (err) {
+    console.error('[RecognitionLog]', err.name || 'error');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/recognition/logs', async (req, res) => {
+  try {
+    const limit = Math.min(
+      RECOGNITION_LOG_EXPORT_LIMIT,
+      Math.max(1, Number(req.query?.limit || RECOGNITION_LOG_EXPORT_LIMIT))
+    );
+    const events = await readRecognitionLogEvents(limit);
+    if (req.query?.format === 'jsonl') {
+      res.type('text/plain').send(events.map((event) => JSON.stringify(event)).join('\n') + (events.length ? '\n' : ''));
+      return;
+    }
+    let sizeBytes = 0;
+    try {
+      sizeBytes = (await stat(RECOGNITION_LOG_PATH)).size;
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+    res.json({
+      path: RECOGNITION_LOG_PATH,
+      enabled: RECOGNITION_LOG_ENABLED,
+      count: events.length,
+      sizeBytes,
+      events,
+    });
+  } catch (err) {
+    console.error('[RecognitionLogs]', err.name || 'error');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/recognition/calibration', async (req, res) => {
+  try {
+    const limit = Math.min(
+      RECOGNITION_LOG_EXPORT_LIMIT,
+      Math.max(1, Number(req.query?.limit || RECOGNITION_LOG_EXPORT_LIMIT))
+    );
+    const events = await readRecognitionLogEvents(limit);
+    res.json(recognitionCalibrationReport(events));
+  } catch (err) {
+    console.error('[RecognitionCalibration]', err.name || 'error');
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/recognize/debug', async (_req, res) => {
   try {
     const r = await fetch(`${POSE_SERVER_URL}/recognize/debug`);
@@ -1142,6 +1384,9 @@ app.post('/api/recognize', async (req, res) => {
   const room = roomForMetrics(req.body?.roomId || req.query?.room);
   const startedAt = performance.now();
   const frames = req.body?.frames;
+  const roomId = normalizeRoomId(req.body?.roomId || req.query?.room);
+  const attemptId = String(req.body?.attemptId || '').slice(0, 96) || createPipelineId();
+  const targetGloss = String(req.body?.targetGloss || '').trim().toLowerCase();
   if (!Array.isArray(frames)) {
     recordFailure(room, 'recognition_invalid_request', {
       route: '/api/recognize',
@@ -1178,7 +1423,25 @@ app.post('/api/recognize', async (req, res) => {
       });
       return res.status(r.status).json({ error: 'Recognition failed' });
     }
-    res.json(await r.json());
+    const payload = await r.json();
+    const predictedGloss = payload.gloss || payload.recognized_gloss || payload.candidates?.[0]?.gloss || '';
+    appendRecognitionLog({
+      type: 'recognition_attempt',
+      roomId,
+      attemptId,
+      targetGloss,
+      predictedGloss,
+      accepted: payload.accepted === true,
+      spoken: false,
+      confidence: payload.confidence,
+      mean_confidence: payload.mean_confidence,
+      temporal_confidence: payload.temporal_confidence,
+      margin: payload.debug?.top_margin,
+      reason: payload.reason,
+      candidates: payload.candidates,
+      debug: payload.debug,
+    }).catch((logErr) => console.error('[RecognitionLog]', logErr.name || 'error'));
+    res.json({ ...payload, attemptId });
   } catch (err) {
     recordTiming(room, 'recognition', performance.now() - startedAt, {
       route: '/api/recognize',
