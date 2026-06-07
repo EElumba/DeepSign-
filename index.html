@@ -568,7 +568,7 @@
     }
     .correction-actions {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-columns: minmax(0, 1fr) auto auto;
       gap: 8px;
       align-items: center;
     }
@@ -579,6 +579,24 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+    .recognition-validation {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 6px;
+      align-items: center;
+      min-width: 0;
+    }
+    .recognition-validation input {
+      width: 100%;
+      min-width: 0;
+      padding: 9px 8px;
+      color: #fff;
+      background: #151515;
+      border: 1px solid #444;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 12px;
     }
 
     #english-output {
@@ -599,6 +617,7 @@
     #micBtn    { background: #2ecc71; }
     #cameraBtn { background: #2ecc71; }
     #useGlossBtn, #useCandidateBtn { background: #2471a3; }
+    #noneCandidateBtn, #exportRecognitionBtn { background: #555; }
     #micBtn.recording, #cameraBtn.recording { background: #e74c3c; }
     #resetBtn, #signResetBtn { background: #555; }
     .sign-controls { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr); }
@@ -613,7 +632,8 @@
       .demo-grid,
       .controls,
       .sign-controls,
-      .correction-actions {
+      .correction-actions,
+      .recognition-validation {
         grid-template-columns: 1fr;
       }
       .pairing-header,
@@ -700,6 +720,11 @@
   <!-- SIGN to SPEAK panel -->
   <section id="sign-panel" role="tabpanel" aria-labelledby="signModeBtn" hidden style="display:none; flex-direction:column; gap:10px;">
     <div id="sign-status" role="status" aria-live="polite">Start camera then sign a word.</div>
+    <div class="recognition-validation">
+      <input id="targetGlossInput" type="text" autocomplete="off" spellcheck="false" placeholder="Target gloss" aria-label="Validation target gloss" />
+      <button id="setTargetGlossBtn" class="inline-action" type="button">Set</button>
+      <button id="exportRecognitionBtn" class="inline-action" type="button">Export</button>
+    </div>
     <canvas id="signCanvas" width="640" height="480" role="img" aria-label="Camera preview with detected hand landmarks"></canvas>
     <div id="recognition-error" class="recognition-error" role="status" aria-live="polite"></div>
     <div id="gloss-display" class="recognition-chips" role="list" aria-live="polite" aria-label="Recognized ASL gloss words" title="Recognized gloss words"></div>
@@ -712,6 +737,7 @@
       <div id="candidate-list" class="candidate-list" role="listbox" aria-label="Recognition candidates"></div>
       <div class="correction-actions">
         <div id="correction-note" class="correction-note"></div>
+        <button id="noneCandidateBtn" type="button" hidden>None of these</button>
         <button id="useCandidateBtn" type="button" disabled>Use this instead</button>
       </div>
     </div>
@@ -1670,26 +1696,37 @@ const candidateList = document.getElementById('candidate-list');
 const correctionNote = document.getElementById('correction-note');
 const closeCorrectionBtn = document.getElementById('closeCorrectionBtn');
 const useCandidateBtn = document.getElementById('useCandidateBtn');
+const noneCandidateBtn = document.getElementById('noneCandidateBtn');
 const englishOutput = document.getElementById('english-output');
 const signStatus    = document.getElementById('sign-status');
 const cameraBtn     = document.getElementById('cameraBtn');
 const useGlossBtn   = document.getElementById('useGlossBtn');
 const signResetBtn  = document.getElementById('signResetBtn');
+const targetGlossInput = document.getElementById('targetGlossInput');
+const setTargetGlossBtn = document.getElementById('setTargetGlossBtn');
+const exportRecognitionBtn = document.getElementById('exportRecognitionBtn');
 
 const MIN_SIGN_FRAMES    = 10;    // ignore gestures shorter than this many frames
 const MAX_SIGN_FRAMES    = 120;   // force-flush after ~4 s at 30 fps
 const REST_FRAMES        = 20;    // still frames before treating sign as complete
 const SIGN_PREROLL_FRAMES = 6;    // include setup handshape before movement starts
 const VELOCITY_THRESHOLD = 0.012; // normalized wrist movement to count as "active"
-const CONFIDENCE_MIN     = 0.45;  // recognition confidence gate
 const GLOSS_IDLE_MS      = 2500;  // silence after last gloss → translate + speak
 const MAX_RECOGNITION_CANDIDATES = 5;
+const DEFAULT_RECOGNITION_CONFIG = Object.freeze({
+  fallbackConfidenceMin: 0.62,
+  smoothingWindowSize: 3,
+  smoothingRequiredAgreement: 2,
+  smoothingMaxAgeMs: 7000,
+  autoOpenCorrection: true,
+});
 
 let holistic        = null;
 let signStream      = null;
 let signRunning     = false;
 let signFrameBuffer = [];
 let signPreRollFrames = [];
+let smoothingWindows = [];
 let recognizedSigns = [];
 let signActive      = false;
 let signRestCount   = 0;
@@ -1700,11 +1737,52 @@ let recognitionIdSeq = 0;
 let selectedSignId = null;
 let pendingCandidate = null;
 let lastRemovedSign = null;
+let lastRecognitionPayload = null;
+let recognitionConfig = { ...DEFAULT_RECOGNITION_CONFIG };
+let pendingAttempt = null;
+let correctionMode = 'chip';
+let targetGloss = '';
 
 function setSignStatus(msg) { signStatus.textContent = msg; }
 
 function formatGloss(value) {
   return String(value || '').trim().replace(/_/g, ' ').replace(/\s+/g, ' ').toUpperCase();
+}
+
+function normalizeGlossKey(value) {
+  return String(value || '').trim().replace(/_/g, ' ').replace(/\s+/g, ' ').toLowerCase();
+}
+
+function createAttemptId() {
+  return `attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function loadRecognitionConfig() {
+  try {
+    const response = await fetch('/api/recognition/config');
+    if (!response.ok) return;
+    const payload = await response.json();
+    recognitionConfig = {
+      ...recognitionConfig,
+      ...(payload.client || {}),
+    };
+  } catch (err) {
+    console.warn('[RecognitionConfig]', err);
+  }
+}
+
+function logRecognitionEvent(event) {
+  fetch('/api/recognition/log', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event: {
+        roomId,
+        targetGloss,
+        ...event,
+      },
+    }),
+  }).catch(err => console.warn('[RecognitionLog]', err));
 }
 
 function normalizeConfidence(value) {
@@ -1777,12 +1855,45 @@ function normalizeRecognition(payload) {
   const selected = primary || candidates[0] || null;
   return selected ? {
     id: `rec-${Date.now()}-${recognitionIdSeq++}`,
+    attemptId: payload?.attemptId || null,
+    attemptIds: payload?.attemptId ? [payload.attemptId] : [],
     value: selected.gloss,
     original: selected.gloss,
     confidence: selected.confidence,
     candidates,
+    accepted: payload?.accepted === true,
+    reason: payload?.reason || payload?.debug?.reason || null,
+    debug: payload?.debug || null,
     corrected: false,
   } : null;
+}
+
+function recognitionRejectionMessage(payload) {
+  const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+  const topCandidate = normalizeCandidate(candidates[0]);
+  const topGloss = formatGloss(payload?.recognized_gloss || topCandidate?.gloss || '');
+  const confidence = formatConfidence(payload?.confidence ?? topCandidate?.confidence);
+  const reason = String(payload?.reason || payload?.debug?.reason || '');
+
+  if (reason.startsWith('insufficient_hand_visibility')) {
+    return 'I need a clearer view of your hand for a few more frames.';
+  }
+  if (reason.startsWith('insufficient_motion') || reason.startsWith('rigid_slide_rejected')) {
+    return 'Not confident yet. Please sign the full motion again.';
+  }
+  if (reason.startsWith('ambiguous_match')) {
+    return topGloss
+      ? `Not confident yet. Top match was ${topGloss}${confidence ? ` (${confidence})` : ''}, but it was too close to another sign.`
+      : 'Not confident yet. Please sign that again a little more clearly.';
+  }
+  if (reason.startsWith('low_confidence')) {
+    return topGloss
+      ? `Not confident yet. Top match was ${topGloss}${confidence ? ` (${confidence})` : ''}.`
+      : 'Not confident yet. Please sign that again.';
+  }
+  return topGloss
+    ? `Not confident yet. Top match was ${topGloss}${confidence ? ` (${confidence})` : ''}.`
+    : 'No recognizable sign detected.';
 }
 
 function clearRecognitionError() {
@@ -1877,28 +1988,39 @@ function openCorrectionPanel(signId) {
   const sign = recognizedSigns.find(item => item.id === signId);
   if (!sign) return;
 
+  correctionMode = 'chip';
+  pendingAttempt = null;
   selectedSignId = sign.id;
   pendingCandidate = { gloss: sign.value, confidence: sign.confidence };
   correctionTitle.textContent = `Correction: ${sign.value}`;
   correctionNote.textContent = sign.candidates.length > 1
     ? 'Top matches from this detection.'
     : 'No alternatives from recognizer.';
+  useCandidateBtn.textContent = 'Use this instead';
   useCandidateBtn.disabled = true;
-  candidateList.textContent = '';
+  noneCandidateBtn.hidden = true;
+  renderCandidateOptions(sign.candidates, sign.value);
+  correctionPanel.hidden = false;
+}
 
-  if (!sign.candidates.length) {
+function renderCandidateOptions(candidates, selectedGloss = '') {
+  candidateList.textContent = '';
+  const selectedKey = normalizeGlossKey(selectedGloss);
+
+  if (!candidates.length) {
     const empty = document.createElement('div');
     empty.className = 'candidate-empty';
     empty.textContent = 'No alternatives available for this sign.';
     candidateList.appendChild(empty);
   } else {
-    for (const candidate of sign.candidates.slice(0, MAX_RECOGNITION_CANDIDATES)) {
+    for (const candidate of candidates.slice(0, MAX_RECOGNITION_CANDIDATES)) {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'candidate-btn';
       button.setAttribute('role', 'option');
-      button.setAttribute('aria-selected', candidate.gloss === sign.value ? 'true' : 'false');
-      if (candidate.gloss === sign.value) button.classList.add('selected');
+      const isSelected = normalizeGlossKey(candidate.gloss) === selectedKey;
+      button.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+      if (isSelected) button.classList.add('selected');
 
       const word = document.createElement('span');
       word.className = 'candidate-word';
@@ -1921,22 +2043,60 @@ function openCorrectionPanel(signId) {
         }
         button.classList.add('selected');
         button.setAttribute('aria-selected', 'true');
-        useCandidateBtn.disabled = candidate.gloss === sign.value;
+        useCandidateBtn.disabled = correctionMode === 'chip' && normalizeGlossKey(candidate.gloss) === selectedKey;
       });
       candidateList.appendChild(button);
     }
   }
-
-  correctionPanel.hidden = false;
 }
 
 function closeCorrectionPanel() {
   selectedSignId = null;
   pendingCandidate = null;
+  pendingAttempt = null;
+  correctionMode = 'chip';
+  noneCandidateBtn.hidden = true;
+  useCandidateBtn.textContent = 'Use this instead';
   correctionPanel.hidden = true;
 }
 
 function confirmCandidateCorrection() {
+  if (correctionMode === 'attempt') {
+    if (!pendingAttempt || !pendingCandidate) return;
+    const recognition = {
+      id: `rec-${Date.now()}-${recognitionIdSeq++}`,
+      attemptId: pendingAttempt.attemptId,
+      attemptIds: pendingAttempt.attemptId ? [pendingAttempt.attemptId] : [],
+      value: pendingCandidate.gloss,
+      original: pendingAttempt.predictedGloss || pendingCandidate.gloss,
+      confidence: pendingCandidate.confidence,
+      candidates: pendingAttempt.candidates,
+      accepted: false,
+      reason: pendingAttempt.reason,
+      debug: pendingAttempt.debug,
+      corrected: true,
+    };
+    recognizedSigns.push(recognition);
+    logRecognitionEvent({
+      type: 'recognition_correction',
+      attemptId: pendingAttempt.attemptId,
+      predictedGloss: pendingAttempt.predictedGloss,
+      selectedCorrection: pendingCandidate.gloss,
+      correctionType: 'rejected_attempt',
+      confidence: pendingCandidate.confidence,
+      reason: pendingAttempt.reason,
+      candidates: pendingAttempt.candidates,
+      debug: pendingAttempt.debug,
+      spoken: false,
+    });
+    closeCorrectionPanel();
+    clearRecognitionError();
+    renderRecognizedSigns();
+    showRecognitionNotice(`Using ${recognition.value}.`, '', null);
+    scheduleGlossFlush();
+    return;
+  }
+
   if (!selectedSignId || !pendingCandidate) return;
   const sign = recognizedSigns.find(item => item.id === selectedSignId);
   if (!sign || pendingCandidate.gloss === sign.value) return;
@@ -1944,10 +2104,70 @@ function confirmCandidateCorrection() {
   sign.value = pendingCandidate.gloss;
   sign.confidence = pendingCandidate.confidence;
   sign.corrected = true;
+  logRecognitionEvent({
+    type: 'recognition_correction',
+    attemptId: sign.attemptId || sign.attemptIds?.[0],
+    predictedGloss: sign.original,
+    selectedCorrection: pendingCandidate.gloss,
+    correctionType: 'chip',
+    confidence: pendingCandidate.confidence,
+    candidates: sign.candidates,
+    spoken: false,
+  });
   closeCorrectionPanel();
   renderRecognizedSigns();
   showRecognitionNotice(`Using ${sign.value}.`, '', null);
   scheduleGlossFlush();
+}
+
+function openAttemptCorrection(payload, message) {
+  const candidates = uniqueCandidates(payload?.candidates || []);
+  const top = normalizeCandidate({
+    gloss: payload?.recognized_gloss || payload?.gloss || candidates[0]?.gloss,
+    confidence: payload?.confidence,
+    mean_confidence: payload?.mean_confidence,
+    temporal_confidence: payload?.temporal_confidence,
+  });
+  const allCandidates = uniqueCandidates([
+    ...(top ? [top] : []),
+    ...candidates,
+  ]);
+
+  correctionMode = 'attempt';
+  selectedSignId = null;
+  pendingCandidate = null;
+  pendingAttempt = {
+    attemptId: payload?.attemptId || null,
+    predictedGloss: top?.gloss || '',
+    reason: payload?.reason || payload?.debug?.reason || null,
+    candidates: allCandidates,
+    debug: payload?.debug || null,
+  };
+  correctionTitle.textContent = 'Choose intended sign';
+  correctionNote.textContent = message || 'Top matches from this attempt.';
+  useCandidateBtn.textContent = 'Use selected sign';
+  useCandidateBtn.disabled = true;
+  noneCandidateBtn.hidden = false;
+  renderCandidateOptions(allCandidates, '');
+  correctionPanel.hidden = false;
+}
+
+function markNoneOfThese() {
+  if (!pendingAttempt) return;
+  logRecognitionEvent({
+    type: 'recognition_correction',
+    attemptId: pendingAttempt.attemptId,
+    predictedGloss: pendingAttempt.predictedGloss,
+    selectedCorrection: '',
+    correctionType: 'none_of_these',
+    noneOfThese: true,
+    reason: pendingAttempt.reason,
+    candidates: pendingAttempt.candidates,
+    debug: pendingAttempt.debug,
+    spoken: false,
+  });
+  closeCorrectionPanel();
+  showRecognitionNotice('Marked none of these.', '', null);
 }
 
 function removeRecognizedSign(signId) {
@@ -1972,7 +2192,113 @@ function undoRemoveRecognizedSign() {
   scheduleGlossFlush();
 }
 
+function resetSmoothing() {
+  smoothingWindows = [];
+}
+
+function smoothingSummaryFor(gloss) {
+  const now = Date.now();
+  const maxAge = recognitionConfig.smoothingMaxAgeMs || DEFAULT_RECOGNITION_CONFIG.smoothingMaxAgeMs;
+  smoothingWindows = smoothingWindows
+    .filter(item => now - item.at <= maxAge)
+    .slice(-(recognitionConfig.smoothingWindowSize || DEFAULT_RECOGNITION_CONFIG.smoothingWindowSize));
+  const key = normalizeGlossKey(gloss);
+  const matches = smoothingWindows.filter(item => normalizeGlossKey(item.value) === key);
+  return {
+    matches,
+    agreement: matches.length,
+    requiredAgreement: recognitionConfig.smoothingRequiredAgreement || DEFAULT_RECOGNITION_CONFIG.smoothingRequiredAgreement,
+    windowSize: smoothingWindows.length,
+  };
+}
+
+function commitSmoothedRecognition(recognition, summary) {
+  const matchingAttempts = summary.matches.map(item => item.attemptId).filter(Boolean);
+  recognition.attemptIds = Array.from(new Set([
+    ...(recognition.attemptIds || []),
+    ...matchingAttempts,
+  ]));
+  recognizedSigns.push(recognition);
+  resetSmoothing();
+  clearRecognitionError();
+  showRecognitionNotice('', '', null);
+  renderRecognizedSigns();
+  scheduleGlossFlush();
+  logRecognitionEvent({
+    type: 'recognition_smoothing',
+    attemptId: recognition.attemptId,
+    predictedGloss: recognition.value,
+    accepted: true,
+    spoken: false,
+    confidence: recognition.confidence,
+    reason: recognition.reason,
+    candidates: recognition.candidates,
+    debug: recognition.debug,
+    smoothing: {
+      candidateGloss: recognition.value,
+      agreement: summary.agreement,
+      requiredAgreement: summary.requiredAgreement,
+      windowSize: summary.windowSize,
+      committed: true,
+    },
+  });
+}
+
+function addRecognitionWindow(recognition) {
+  const now = Date.now();
+  smoothingWindows.push({
+    at: now,
+    attemptId: recognition.attemptId,
+    value: recognition.value,
+    confidence: recognition.confidence,
+  });
+
+  const maxWindow = recognitionConfig.smoothingWindowSize || DEFAULT_RECOGNITION_CONFIG.smoothingWindowSize;
+  while (smoothingWindows.length > maxWindow) smoothingWindows.shift();
+
+  const summary = smoothingSummaryFor(recognition.value);
+  logRecognitionEvent({
+    type: 'recognition_smoothing',
+    attemptId: recognition.attemptId,
+    predictedGloss: recognition.value,
+    accepted: recognition.accepted,
+    spoken: false,
+    confidence: recognition.confidence,
+    reason: recognition.reason,
+    candidates: recognition.candidates,
+    debug: recognition.debug,
+    smoothing: {
+      candidateGloss: recognition.value,
+      agreement: summary.agreement,
+      requiredAgreement: summary.requiredAgreement,
+      windowSize: summary.windowSize,
+      committed: summary.agreement >= summary.requiredAgreement,
+    },
+  });
+
+  if (summary.agreement >= summary.requiredAgreement) {
+    commitSmoothedRecognition(recognition, summary);
+    return true;
+  }
+
+  showRecognitionNotice(
+    `Confirming ${recognition.value}: ${summary.agreement}/${summary.requiredAgreement}`,
+    'Choose',
+    () => openAttemptCorrection({
+      ...lastRecognitionPayload,
+      candidates: recognition.candidates,
+      recognized_gloss: recognition.value,
+      confidence: recognition.confidence,
+      attemptId: recognition.attemptId,
+      reason: 'manual_review_from_smoothing',
+      debug: recognition.debug,
+    }, 'Select the intended sign or mark none.')
+  );
+  return false;
+}
+
 renderRecognizedSigns();
+loadRecognitionConfig();
 
 window.DeepSignRecognitionDebug = {
   addSample(payload) {
@@ -1988,10 +2314,32 @@ window.DeepSignRecognitionDebug = {
   },
   reset() {
     recognizedSigns = [];
+    resetSmoothing();
     lastRemovedSign = null;
+    pendingAttempt = null;
     clearRecognitionError();
     showRecognitionNotice('', '', null);
     renderRecognizedSigns();
+  },
+  lastResult() {
+    return lastRecognitionPayload;
+  },
+  async server() {
+    const response = await fetch('/api/recognize/debug');
+    return response.json();
+  },
+  async logs(limit = 200) {
+    const response = await fetch(`/api/recognition/logs?limit=${encodeURIComponent(limit)}`);
+    return response.json();
+  },
+  async calibration(limit = 1000) {
+    const response = await fetch(`/api/recognition/calibration?limit=${encodeURIComponent(limit)}`);
+    return response.json();
+  },
+  setTarget(gloss) {
+    targetGloss = normalizeGlossKey(gloss);
+    targetGlossInput.value = targetGloss;
+    showRecognitionNotice(targetGloss ? `Target: ${formatGloss(targetGloss)}` : 'Target cleared.', '', null);
   },
 };
 
@@ -2153,22 +2501,31 @@ async function flushSignBuffer() {
   recognizing = true;
   setSignStatus('Recognizing…');
   try {
+    const attemptId = createAttemptId();
     const r = await fetch('/api/recognize', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ roomId, frames }),
+      body: JSON.stringify({ roomId, attemptId, targetGloss, frames }),
     });
     if (!r.ok) throw new Error(r.statusText);
     const payload = await r.json();
+    payload.attemptId = payload.attemptId || attemptId;
+    lastRecognitionPayload = payload;
+    console.debug('[Recognize]', payload);
+    if (payload?.accepted === false) {
+      const message = recognitionRejectionMessage(payload);
+      showRecognitionError(message);
+      if (recognitionConfig.autoOpenCorrection !== false) openAttemptCorrection(payload, message);
+      return;
+    }
     const recognition = normalizeRecognition(payload);
-    if (recognition && (recognition.confidence == null || recognition.confidence >= CONFIDENCE_MIN)) {
-      recognizedSigns.push(recognition);
-      clearRecognitionError();
-      showRecognitionNotice('', '', null);
-      renderRecognizedSigns();
-      scheduleGlossFlush();
+    const fallbackMin = recognitionConfig.fallbackConfidenceMin ?? DEFAULT_RECOGNITION_CONFIG.fallbackConfidenceMin;
+    if (recognition && (recognition.confidence == null || recognition.confidence >= fallbackMin)) {
+      addRecognitionWindow(recognition);
     } else if (recognition) {
-      showRecognitionError(`Low-confidence match: ${recognition.value}. Try again or sign more clearly.`);
+      const message = `Low-confidence match: ${recognition.value}. Try again or choose a candidate.`;
+      showRecognitionError(message);
+      openAttemptCorrection({ ...payload, accepted: false, reason: 'frontend_low_confidence' }, message);
     } else {
       showRecognitionError('No recognizable sign detected.');
     }
@@ -2192,8 +2549,16 @@ async function flushGlossesToEnglish() {
   if (!recognizedSigns.length) return;
   closeCorrectionPanel();
   const gloss = activeGlossPhrase();
+  const spokenSigns = recognizedSigns.map(sign => ({
+    value: sign.value,
+    original: sign.original,
+    corrected: sign.corrected,
+    attemptIds: sign.attemptIds || (sign.attemptId ? [sign.attemptId] : []),
+    confidence: sign.confidence,
+  }));
   recognizedSigns = [];
   lastRemovedSign = null;
+  resetSmoothing();
   renderRecognizedSigns();
   showRecognitionNotice('', '', null);
   setSignStatus('Translating…');
@@ -2206,6 +2571,20 @@ async function flushGlossesToEnglish() {
     if (!geRes.ok) throw new Error(geRes.statusText);
     const { text } = await geRes.json();
     englishOutput.textContent = text;
+    logRecognitionEvent({
+      type: 'recognition_spoken',
+      attemptId: spokenSigns.flatMap(sign => sign.attemptIds)[0],
+      predictedGloss: gloss,
+      selectedCorrection: spokenSigns.some(sign => sign.corrected) ? gloss : '',
+      correctionType: spokenSigns.some(sign => sign.corrected) ? 'phrase_contains_correction' : '',
+      spoken: true,
+      phrase: gloss,
+      candidates: [],
+      smoothing: {
+        committed: true,
+        windowSize: spokenSigns.length,
+      },
+    });
     setSignStatus('Speaking…');
     await speakText(text);
   } catch (e) {
@@ -2256,12 +2635,46 @@ closeCorrectionBtn.addEventListener('click', () => {
 });
 
 useCandidateBtn.addEventListener('click', confirmCandidateCorrection);
+noneCandidateBtn.addEventListener('click', markNoneOfThese);
+
+setTargetGlossBtn.addEventListener('click', () => {
+  targetGloss = normalizeGlossKey(targetGlossInput.value);
+  targetGlossInput.value = targetGloss;
+  showRecognitionNotice(targetGloss ? `Target: ${formatGloss(targetGloss)}` : 'Target cleared.', '', null);
+});
+
+targetGlossInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    setTargetGlossBtn.click();
+  }
+});
+
+exportRecognitionBtn.addEventListener('click', async () => {
+  try {
+    const [logsResponse, reportResponse] = await Promise.all([
+      fetch('/api/recognition/logs?limit=200'),
+      fetch('/api/recognition/calibration?limit=1000'),
+    ]);
+    const logs = logsResponse.ok ? await logsResponse.json() : null;
+    const report = reportResponse.ok ? await reportResponse.json() : null;
+    console.table(logs?.events || []);
+    console.info('[RecognitionCalibration]', report);
+    showRecognitionNotice(`Exported ${logs?.count || 0} log event(s) to console.`, '', null);
+  } catch (err) {
+    console.error('[RecognitionExport]', err);
+    showRecognitionError('Could not export recognition logs.');
+  }
+});
 
 signResetBtn.addEventListener('click', () => {
   if (glossTimer) { clearTimeout(glossTimer); glossTimer = null; }
   recognizedSigns = [];
+  resetSmoothing();
   selectedSignId = null;
   pendingCandidate = null;
+  pendingAttempt = null;
+  closeCorrectionPanel();
   lastRemovedSign = null;
   signFrameBuffer = [];
   signPreRollFrames = [];

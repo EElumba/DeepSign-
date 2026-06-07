@@ -50,6 +50,17 @@ RECOGNIZE_TOP_K = max(1, int(os.environ.get("RECOGNIZE_TOP_K", "48")))
 RECOGNIZE_TEMPORAL_WEIGHT = float(os.environ.get("RECOGNIZE_TEMPORAL_WEIGHT", "0.65"))
 RECOGNIZE_TEMPORAL_WEIGHT = min(1.0, max(0.0, RECOGNIZE_TEMPORAL_WEIGHT))
 RECOGNIZE_DTW_BAND = max(1, int(os.environ.get("RECOGNIZE_DTW_BAND", "6")))
+RECOGNIZE_CONFIDENCE_MIN = float(os.environ.get("RECOGNIZE_CONFIDENCE_MIN", "0.70"))
+RECOGNIZE_MARGIN_MIN = float(os.environ.get("RECOGNIZE_MARGIN_MIN", "0.04"))
+RECOGNIZE_HIGH_CONFIDENCE_MIN = float(os.environ.get("RECOGNIZE_HIGH_CONFIDENCE_MIN", "0.92"))
+RECOGNIZE_HIGH_CONFIDENCE_MARGIN_MIN = float(os.environ.get("RECOGNIZE_HIGH_CONFIDENCE_MARGIN_MIN", "0.02"))
+RECOGNIZE_MIN_VISIBLE_FRAMES = max(1, int(os.environ.get("RECOGNIZE_MIN_VISIBLE_FRAMES", "8")))
+RECOGNIZE_MIN_VISIBLE_RATIO = float(os.environ.get("RECOGNIZE_MIN_VISIBLE_RATIO", "0.45"))
+RECOGNIZE_MIN_VISIBLE_RATIO = min(1.0, max(0.0, RECOGNIZE_MIN_VISIBLE_RATIO))
+RECOGNIZE_MIN_MOTION_PATH = float(os.environ.get("RECOGNIZE_MIN_MOTION_PATH", "0.08"))
+RECOGNIZE_MIN_HANDSHAPE_DELTA = float(os.environ.get("RECOGNIZE_MIN_HANDSHAPE_DELTA", "0.025"))
+RECOGNIZE_RIGID_SLIDE_PATH_MIN = float(os.environ.get("RECOGNIZE_RIGID_SLIDE_PATH_MIN", "0.20"))
+RECOGNIZE_RIGID_SLIDE_EFFICIENCY = float(os.environ.get("RECOGNIZE_RIGID_SLIDE_EFFICIENCY", "0.88"))
 HAND_CONFIDENCE_MIN = float(os.environ.get("HAND_CONFIDENCE_MIN", "0.1"))
 TRAJECTORY_FEATURE_WEIGHT = float(os.environ.get("TRAJECTORY_FEATURE_WEIGHT", "2.5"))
 VISIBILITY_FEATURE_WEIGHT = float(os.environ.get("VISIBILITY_FEATURE_WEIGHT", "0.25"))
@@ -113,6 +124,11 @@ _preload_status = {
 # --- Sign recognition lexicon (loaded at startup) ---
 _lexicon_features: dict = {}   # gloss -> {"mean": np.ndarray, "sequence": np.ndarray}
 _lexicon_features_lock = Lock()
+_recognition_debug_lock = Lock()
+_last_recognition_debug: dict = {
+    "status": "not_run",
+    "fallback_used": False,
+}
 
 
 def _fingerspelling_lexicon_dir() -> str:
@@ -347,6 +363,20 @@ def _pose_lookup_snapshot() -> dict:
 # Sign recognition helpers
 # ---------------------------------------------------------------------------
 
+def _plain_float_array(value, fill_value=np.nan) -> np.ndarray:
+    """Return a regular float32 ndarray, replacing masked pose values first."""
+    return np.asarray(np.ma.filled(value, fill_value), dtype=np.float32)
+
+
+def _coerce_hand(lm: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    if lm is None:
+        return None
+    arr = _plain_float_array(lm)
+    if arr.shape != (21, 3) or not np.isfinite(arr).all():
+        return None
+    return arr
+
+
 def _normalize_hand(lm: Optional[np.ndarray]) -> np.ndarray:
     """Center a hand at its wrist and normalize by max finger distance.
 
@@ -355,9 +385,10 @@ def _normalize_hand(lm: Optional[np.ndarray]) -> np.ndarray:
     comparable regardless of absolute coordinate system.
     """
     zeros = np.zeros((21, 3), dtype=np.float32)
-    if lm is None or lm.shape != (21, 3) or not np.isfinite(lm).all():
+    lm = _coerce_hand(lm)
+    if lm is None:
         return zeros
-    lm = lm.astype(np.float32)
+    lm = lm.astype(np.float32, copy=True)
     lm -= lm[0]  # center at wrist (index 0)
     scale = np.linalg.norm(lm, axis=1).max()
     if scale > 1e-6:
@@ -371,10 +402,11 @@ def _frame_feature(lh: Optional[np.ndarray], rh: Optional[np.ndarray]) -> np.nda
 
 
 def _valid_hand(lm: Optional[np.ndarray]) -> bool:
-    return lm is not None and lm.shape == (21, 3) and np.isfinite(lm).all()
+    return _coerce_hand(lm) is not None
 
 
 def _hand_scale(lm: np.ndarray) -> float:
+    lm = _plain_float_array(lm)
     centered = lm.astype(np.float32) - lm[0]
     return float(np.linalg.norm(centered, axis=1).max())
 
@@ -429,25 +461,27 @@ def _hand_frames_to_features(hand_frames: list) -> tuple[Optional[np.ndarray], O
     scales = []
 
     for lh, rh in hand_frames:
-        lh_valid = _valid_hand(lh)
-        rh_valid = _valid_hand(rh)
+        lh_arr = _coerce_hand(lh)
+        rh_arr = _coerce_hand(rh)
+        lh_valid = lh_arr is not None
+        rh_valid = rh_arr is not None
         if not lh_valid and not rh_valid:
             continue
 
-        shape_feats.append(_frame_feature(lh if lh_valid else None, rh if rh_valid else None))
-        left_wrists.append(lh[0, :2] if lh_valid else [np.nan, np.nan])
-        right_wrists.append(rh[0, :2] if rh_valid else [np.nan, np.nan])
+        shape_feats.append(_frame_feature(lh_arr, rh_arr))
+        left_wrists.append(lh_arr[0, :2] if lh_valid else [np.nan, np.nan])
+        right_wrists.append(rh_arr[0, :2] if rh_valid else [np.nan, np.nan])
         visibility.append([1.0 if lh_valid else 0.0, 1.0 if rh_valid else 0.0])
         if lh_valid:
-            scales.append(_hand_scale(lh))
+            scales.append(_hand_scale(lh_arr))
         if rh_valid:
-            scales.append(_hand_scale(rh))
+            scales.append(_hand_scale(rh_arr))
 
     if not shape_feats:
         return None, None
 
     shape = np.stack(shape_feats).astype(np.float32)
-    mean = shape.mean(axis=0)
+    mean = np.asarray(shape.mean(axis=0), dtype=np.float32)
     mean_norm = np.linalg.norm(mean)
     if mean_norm < 1e-6:
         return None, None
@@ -473,7 +507,7 @@ def _hand_frames_to_features(hand_frames: list) -> tuple[Optional[np.ndarray], O
         ],
         axis=1,
     ).astype(np.float32)
-    sequence = np.nan_to_num(sequence, nan=0.0, posinf=0.0, neginf=0.0)
+    sequence = np.asarray(np.nan_to_num(sequence, nan=0.0, posinf=0.0, neginf=0.0), dtype=np.float32)
     sequence = _resample_sequence(sequence, RECOGNIZE_SEQUENCE_LENGTH)
     sequence = _normalize_rows(sequence)
     return mean, sequence
@@ -489,10 +523,16 @@ def _pose_to_reference_features(pose) -> Optional[dict]:
     hand_frames = []
     for f in range(pose.body.data.shape[0]):
         lh_data = rh_data = None
-        if lh_sl is not None and pose.body.confidence[f, 0, lh_sl].mean() > HAND_CONFIDENCE_MIN:
-            lh_data = pose.body.data[f, 0, lh_sl, :3]
-        if rh_sl is not None and pose.body.confidence[f, 0, rh_sl].mean() > HAND_CONFIDENCE_MIN:
-            rh_data = pose.body.data[f, 0, rh_sl, :3]
+        if lh_sl is not None:
+            lh_conf = _plain_float_array(pose.body.confidence[f, 0, lh_sl], 0.0)
+            lh_candidate = _coerce_hand(pose.body.data[f, 0, lh_sl, :3])
+            if lh_candidate is not None and float(lh_conf.mean()) > HAND_CONFIDENCE_MIN:
+                lh_data = lh_candidate
+        if rh_sl is not None:
+            rh_conf = _plain_float_array(pose.body.confidence[f, 0, rh_sl], 0.0)
+            rh_candidate = _coerce_hand(pose.body.data[f, 0, rh_sl, :3])
+            if rh_candidate is not None and float(rh_conf.mean()) > HAND_CONFIDENCE_MIN:
+                rh_data = rh_candidate
         hand_frames.append((lh_data, rh_data))
 
     mean, sequence = _hand_frames_to_features(hand_frames)
@@ -581,6 +621,133 @@ def _load_lexicon_features() -> None:
         f"(top_k={RECOGNIZE_TOP_K}, sequence={RECOGNIZE_SEQUENCE_LENGTH}, "
         f"temporal_weight={RECOGNIZE_TEMPORAL_WEIGHT:.2f})."
     )
+
+
+def _recognition_config_snapshot() -> dict:
+    return {
+        "top_k": RECOGNIZE_TOP_K,
+        "sequence_length": RECOGNIZE_SEQUENCE_LENGTH,
+        "temporal_weight": RECOGNIZE_TEMPORAL_WEIGHT,
+        "dtw_band": RECOGNIZE_DTW_BAND,
+        "confidence_min": RECOGNIZE_CONFIDENCE_MIN,
+        "margin_min": RECOGNIZE_MARGIN_MIN,
+        "high_confidence_min": RECOGNIZE_HIGH_CONFIDENCE_MIN,
+        "high_confidence_margin_min": RECOGNIZE_HIGH_CONFIDENCE_MARGIN_MIN,
+        "min_visible_frames": RECOGNIZE_MIN_VISIBLE_FRAMES,
+        "min_visible_ratio": RECOGNIZE_MIN_VISIBLE_RATIO,
+        "min_motion_path": RECOGNIZE_MIN_MOTION_PATH,
+        "min_handshape_delta": RECOGNIZE_MIN_HANDSHAPE_DELTA,
+        "rigid_slide_path_min": RECOGNIZE_RIGID_SLIDE_PATH_MIN,
+        "rigid_slide_efficiency": RECOGNIZE_RIGID_SLIDE_EFFICIENCY,
+        "hand_confidence_min": HAND_CONFIDENCE_MIN,
+        "trajectory_feature_weight": TRAJECTORY_FEATURE_WEIGHT,
+        "visibility_feature_weight": VISIBILITY_FEATURE_WEIGHT,
+    }
+
+
+def _recognition_index_snapshot() -> dict:
+    with _lexicon_features_lock:
+        classes_loaded = len(_lexicon_features)
+        sample_glosses = sorted(_lexicon_features.keys())[:12]
+    with _recognition_debug_lock:
+        last = dict(_last_recognition_debug)
+    return {
+        "classes_loaded": classes_loaded,
+        "index_path": os.path.join(LEXICON_DIR, "index.csv"),
+        "lexicon_dir": LEXICON_DIR,
+        "sample_glosses": sample_glosses,
+        "config": _recognition_config_snapshot(),
+        "last": last,
+    }
+
+
+def _hand_frame_stats(hand_frames: list) -> dict:
+    total = len(hand_frames)
+    visible = 0
+    left_visible = 0
+    right_visible = 0
+    both_visible = 0
+    paths = []
+    displacements = []
+    efficiencies = []
+    shape_deltas = []
+    for lh, rh in hand_frames:
+        lh_valid = _coerce_hand(lh) is not None
+        rh_valid = _coerce_hand(rh) is not None
+        if lh_valid or rh_valid:
+            visible += 1
+        if lh_valid:
+            left_visible += 1
+        if rh_valid:
+            right_visible += 1
+        if lh_valid and rh_valid:
+            both_visible += 1
+
+    for side in (0, 1):
+        hand_sequence = [_coerce_hand(frame[side]) for frame in hand_frames]
+        hand_sequence = [hand for hand in hand_sequence if hand is not None]
+        if len(hand_sequence) < 2:
+            continue
+
+        scales = [_hand_scale(hand) for hand in hand_sequence]
+        scale_values = [scale for scale in scales if scale > 1e-6 and np.isfinite(scale)]
+        scale = float(np.median(scale_values)) if scale_values else 1.0
+        if scale <= 1e-6 or not np.isfinite(scale):
+            scale = 1.0
+
+        wrists = np.array([hand[0, :2] for hand in hand_sequence], dtype=np.float32)
+        step_distances = np.linalg.norm(np.diff(wrists, axis=0), axis=1) / scale
+        path = float(np.sum(step_distances))
+        displacement = float(np.linalg.norm(wrists[-1] - wrists[0]) / scale)
+        efficiency = displacement / path if path > 1e-6 else 0.0
+        normalized_shapes = np.array([_normalize_hand(hand).flatten() for hand in hand_sequence], dtype=np.float32)
+        shape_delta = float(np.mean(np.linalg.norm(np.diff(normalized_shapes, axis=0), axis=1)))
+
+        paths.append(path)
+        displacements.append(displacement)
+        efficiencies.append(efficiency)
+        shape_deltas.append(shape_delta)
+
+    return {
+        "frames_received": total,
+        "visible_frames": visible,
+        "visibility_ratio": round(visible / total, 4) if total else 0.0,
+        "left_visible_frames": left_visible,
+        "right_visible_frames": right_visible,
+        "both_visible_frames": both_visible,
+        "active_hand_sides": len(paths),
+        "motion_path": round(max(paths), 4) if paths else 0.0,
+        "motion_displacement": round(max(displacements), 4) if displacements else 0.0,
+        "motion_efficiency": round(max(efficiencies), 4) if efficiencies else 0.0,
+        "handshape_delta": round(max(shape_deltas), 4) if shape_deltas else 0.0,
+    }
+
+
+def _not_confident_response(reason: str, debug: dict, candidates: Optional[list] = None, best: Optional[dict] = None) -> dict:
+    candidates = candidates or []
+    best = best or (candidates[0] if candidates else None)
+    response = {
+        "gloss": "",
+        "recognized_gloss": best.get("gloss", "") if best else "",
+        "confidence": best.get("confidence", 0.0) if best else 0.0,
+        "mean_confidence": best.get("mean_confidence", 0.0) if best else 0.0,
+        "temporal_confidence": best.get("temporal_confidence", 0.0) if best else 0.0,
+        "accepted": False,
+        "reason": reason,
+        "fallback_used": False,
+        "candidates": candidates[:5],
+        "debug": debug,
+    }
+    with _recognition_debug_lock:
+        _last_recognition_debug.clear()
+        _last_recognition_debug.update({
+            "status": "rejected",
+            "reason": reason,
+            "fallback_used": False,
+            "top_candidates": candidates[:5],
+            **debug,
+        })
+    return response
 
 
 def _resolve_pose_text(text: str) -> str:
@@ -1136,7 +1303,13 @@ async def health():
             "glosses": len(GLOSS_RESOLVER.lexicon_glosses),
             "aliases": len(GLOSS_RESOLVER.aliases),
         },
+        "recognition": _recognition_index_snapshot(),
     }
+
+
+@app.get("/recognize/debug")
+def recognize_debug():
+    return _recognition_index_snapshot()
 
 
 @app.post("/recognize")
@@ -1158,28 +1331,94 @@ def recognize_sign(req: RecognizeRequest):
         rh_arr = np.array(rh, dtype=np.float32) if (rh and len(rh) == 21) else None
         hand_frames.append((lh_arr, rh_arr))
 
+    stats = _hand_frame_stats(hand_frames)
+    debug = {
+        **stats,
+        "classes_loaded": n_signs,
+        "index_path": os.path.join(LEXICON_DIR, "index.csv"),
+        "fallback_used": False,
+        "accepted": False,
+        "reason": None,
+        "candidates_considered": 0,
+        "top_margin": 0.0,
+    }
+
+    if stats["visible_frames"] < RECOGNIZE_MIN_VISIBLE_FRAMES:
+        reason = (
+            f"insufficient_hand_visibility: {stats['visible_frames']} visible frame(s), "
+            f"need {RECOGNIZE_MIN_VISIBLE_FRAMES}"
+        )
+        debug["reason"] = reason
+        return _not_confident_response(reason, debug)
+
+    if stats["visibility_ratio"] < RECOGNIZE_MIN_VISIBLE_RATIO:
+        reason = (
+            f"insufficient_hand_visibility_ratio: {stats['visibility_ratio']:.2f}, "
+            f"need {RECOGNIZE_MIN_VISIBLE_RATIO:.2f}"
+        )
+        debug["reason"] = reason
+        return _not_confident_response(reason, debug)
+
+    if (
+        stats["motion_path"] < RECOGNIZE_MIN_MOTION_PATH
+        and stats["handshape_delta"] < RECOGNIZE_MIN_HANDSHAPE_DELTA
+    ):
+        reason = (
+            f"insufficient_motion: path {stats['motion_path']:.2f}, "
+            f"handshape_delta {stats['handshape_delta']:.3f}"
+        )
+        debug["reason"] = reason
+        return _not_confident_response(reason, debug)
+
+    if (
+        stats["active_hand_sides"] == 1
+        and stats["motion_path"] >= RECOGNIZE_RIGID_SLIDE_PATH_MIN
+        and stats["motion_efficiency"] >= RECOGNIZE_RIGID_SLIDE_EFFICIENCY
+        and stats["handshape_delta"] < RECOGNIZE_MIN_HANDSHAPE_DELTA
+    ):
+        reason = (
+            f"rigid_slide_rejected: efficiency {stats['motion_efficiency']:.2f}, "
+            f"handshape_delta {stats['handshape_delta']:.3f}"
+        )
+        debug["reason"] = reason
+        return _not_confident_response(reason, debug)
+
     query_mean, query_sequence = _hand_frames_to_features(hand_frames)
     if query_mean is None or query_sequence is None:
-        return {"gloss": "", "confidence": 0.0}
+        reason = "no_usable_hand_features"
+        debug["reason"] = reason
+        return _not_confident_response(reason, debug)
 
     candidates = []
     with _lexicon_features_lock:
         for gloss, ref in _lexicon_features.items():
-            mean_score = float(np.dot(query_mean, ref["mean"]))
+            ref_mean = _plain_float_array(ref["mean"], 0.0)
+            if ref_mean.shape != query_mean.shape:
+                continue
+            mean_score = float(np.dot(query_mean, ref_mean))
+            if not np.isfinite(mean_score):
+                continue
             candidates.append((mean_score, gloss, ref))
 
     if not candidates:
-        return {"gloss": "", "confidence": 0.0}
+        reason = "no_reference_candidates"
+        debug["reason"] = reason
+        return _not_confident_response(reason, debug)
 
     candidates.sort(key=lambda item: item[0], reverse=True)
     reranked = []
 
     for mean_score, gloss, ref in candidates[:RECOGNIZE_TOP_K]:
-        temporal_score = _temporal_similarity(query_sequence, ref["sequence"])
+        ref_sequence = _plain_float_array(ref["sequence"], 0.0)
+        if ref_sequence.shape != query_sequence.shape:
+            continue
+        temporal_score = _temporal_similarity(query_sequence, ref_sequence)
         combined_score = (
             (1.0 - RECOGNIZE_TEMPORAL_WEIGHT) * mean_score
             + RECOGNIZE_TEMPORAL_WEIGHT * temporal_score
         )
+        if not np.isfinite(combined_score):
+            continue
         reranked.append({
             "gloss": gloss,
             "confidence": round(float(combined_score), 4),
@@ -1188,20 +1427,65 @@ def recognize_sign(req: RecognizeRequest):
         })
 
     reranked.sort(key=lambda item: item["confidence"], reverse=True)
-    best = reranked[0] if reranked else {
-        "gloss": "",
-        "confidence": 0.0,
-        "mean_confidence": 0.0,
-        "temporal_confidence": 0.0,
-    }
+    debug["candidates_considered"] = min(RECOGNIZE_TOP_K, len(candidates))
+
+    if not reranked:
+        reason = "no_temporal_candidates"
+        debug["reason"] = reason
+        return _not_confident_response(reason, debug)
+
+    best = reranked[0]
+    runner_up = reranked[1] if len(reranked) > 1 else None
+    top_margin = best["confidence"] - (runner_up["confidence"] if runner_up else 0.0)
+    debug["top_margin"] = round(float(top_margin), 4)
+    debug["top_candidates"] = reranked[:5]
+
+    if best["confidence"] < RECOGNIZE_CONFIDENCE_MIN:
+        reason = (
+            f"low_confidence: {best['confidence']:.2f}, "
+            f"need {RECOGNIZE_CONFIDENCE_MIN:.2f}"
+        )
+        debug["reason"] = reason
+        return _not_confident_response(reason, debug, reranked[:5], best)
+
+    required_margin = (
+        RECOGNIZE_HIGH_CONFIDENCE_MARGIN_MIN
+        if best["confidence"] >= RECOGNIZE_HIGH_CONFIDENCE_MIN
+        else RECOGNIZE_MARGIN_MIN
+    )
+    debug["required_margin"] = round(float(required_margin), 4)
+
+    if runner_up and top_margin < required_margin:
+        reason = (
+            f"ambiguous_match: margin {top_margin:.2f}, "
+            f"need {required_margin:.2f}"
+        )
+        debug["reason"] = reason
+        return _not_confident_response(reason, debug, reranked[:5], best)
+
+    debug["accepted"] = True
+    debug["reason"] = "accepted"
+    with _recognition_debug_lock:
+        _last_recognition_debug.clear()
+        _last_recognition_debug.update({
+            "status": "accepted",
+            "reason": "accepted",
+            "fallback_used": False,
+            **debug,
+        })
 
     return {
         "gloss": best["gloss"],
+        "recognized_gloss": best["gloss"],
         "confidence": best["confidence"],
         "mean_confidence": best["mean_confidence"],
         "temporal_confidence": best["temporal_confidence"],
+        "accepted": True,
+        "reason": "accepted",
+        "fallback_used": False,
         "candidates": reranked[:5],
         "candidates_considered": min(RECOGNIZE_TOP_K, len(candidates)),
+        "debug": debug,
     }
 
 
